@@ -1,0 +1,15 @@
+# Secrets - NEVER push this
+.env
+
+# Runtime data
+study_data.json
+study_data.json.tmp
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE files
+.vscode/
+.idea/
