@@ -1427,6 +1427,4 @@ class TasksCog(commands.Cog, name="Tasks"):
 async def setup(bot: commands.Bot):
     cog = TasksCog(bot)
     await bot.add_cog(cog)
-    bot.tree.add_command(cog.task_group)
-    bot.tree.add_command(cog.focus_group)
-    logger.info("[TASKS] Loaded Tasks Cog Extension with Slash commands group.")
+    logger.info("[TASKS] Loaded Tasks Cog Extension.")
