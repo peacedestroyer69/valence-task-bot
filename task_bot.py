@@ -86,16 +86,17 @@ async def on_ready():
     """Triggers when the bot client is ready, syncing all commands."""
     logger.info(f"Logged in as {bot.user.name} (ID: {bot.user.id})")
     
-    # Sync command tree to guilds to prevent global sync delays
+    # Sync command tree globally
     try:
+        # Step 1: Clear command tree on all currently loaded guilds to remove local duplicates
         for guild in bot.guilds:
-            bot.tree.copy_global_to(guild=guild)
-            synced = await bot.tree.sync(guild=guild)
-            logger.info(f"Synced {len(synced)} slash command(s) to guild {guild.name} (ID: {guild.id}).")
+            bot.tree.clear_commands(guild=guild)
+            await bot.tree.sync(guild=guild)
+            logger.info(f"Cleared guild commands for: {guild.name} (ID: {guild.id})")
 
-        bot.tree.clear_commands(guild=None)
-        await bot.tree.sync()
-        logger.info("Cleared global commands to remove duplicates.")
+        # Step 2: Sync global commands
+        synced = await bot.tree.sync()
+        logger.info(f"Synced {len(synced)} global slash command(s).")
     except Exception as e:
         logger.error(f"Failed to sync slash commands: {e}", exc_info=True)
         
