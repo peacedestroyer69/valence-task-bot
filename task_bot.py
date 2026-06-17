@@ -65,9 +65,9 @@ async def load_extensions():
     cog_dir = "task_cogs"
     os.makedirs(cog_dir, exist_ok=True)
     
-    # Load all Python files in task_cogs/ as extensions, excluding __init__.py and ping.py (unused)
+    # Load all Python files in task_cogs/ as extensions, excluding __init__.py
     for filename in os.listdir(cog_dir):
-        if filename.endswith(".py") and filename not in ("__init__.py", "ping.py"):
+        if filename.endswith(".py") and filename != "__init__.py":
             cog_name = f"task_cogs.{filename[:-3]}"
             try:
                 await bot.load_extension(cog_name)
@@ -86,18 +86,14 @@ async def on_ready():
     """Triggers when the bot client is ready, syncing all commands."""
     logger.info(f"Logged in as {bot.user.name} (ID: {bot.user.id})")
     
-    # Sync slash commands to target guild, then clear global to prevent duplicate syncs
+    # Sync command tree to target guild to prevent global sync delays
     try:
         target_guild = discord.Object(id=1514186381348306964)
         bot.tree.copy_global_to(guild=target_guild)
         synced = await bot.tree.sync(guild=target_guild)
-        logger.info(f"Successfully copied and synced {len(synced)} command(s) to target guild.")
-
-        bot.tree.clear_commands(guild=None)
-        await bot.tree.sync()
-        logger.info("Cleared global commands and synced globally.")
+        logger.info(f"Successfully copied and synced {len(synced)} command(s) to target guild (ID: 1514186381348306964)")
     except Exception as e:
-        logger.error(f"Failed to sync slash commands: {e}", exc_info=True)
+        logger.error(f"Error during slash command synchronization: {e}", exc_info=True)
         
     logger.info("Task Bot is fully initialized and operational.")
 
