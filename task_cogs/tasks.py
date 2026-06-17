@@ -199,6 +199,12 @@ class TaskDetailView(discord.ui.View):
                 super().__init__(timeout=30)
                 self.parent_view = parent_view
                 
+            async def interaction_check(self, sub_interaction: discord.Interaction) -> bool:
+                if sub_interaction.user.id != self.parent_view.caller_id:
+                    await sub_interaction.response.send_message("❌ You cannot confirm deletion for this task.", ephemeral=True)
+                    return False
+                return True
+                
             @discord.ui.button(label="Yes, Delete", style=discord.ButtonStyle.danger)
             async def yes_btn(self, sub_interaction: discord.Interaction, btn: discord.ui.Button):
                 success = await asyncio.to_thread(task_db.delete_task, self.parent_view.task_id)
@@ -892,7 +898,7 @@ class TasksCog(commands.Cog, name="Tasks"):
 
         user_id_str = str(interaction.user.id)
         is_owner = task.get("user_id") == user_id_str
-        is_shared = user_id_str in task.get("shared_with", [])
+        is_shared = user_id_str in (task.get("shared_with") or [])
         
         if task.get("is_private") and not is_owner:
             await interaction.response.send_message("❌ This task is private and cannot be viewed by others.", ephemeral=True)
@@ -964,7 +970,7 @@ class TasksCog(commands.Cog, name="Tasks"):
         for k, v in updates.items():
             embed.add_field(name=k.replace('_', ' ').capitalize(), value=str(v), inline=True)
             
-        await interaction.response.send_message(embed=embed, ephemeral=task.get("is_private"))
+        await interaction.response.send_message(embed=embed, ephemeral=updates.get("is_private", task.get("is_private")))
 
     # 4. DELETE TASK
     @task_group.command(name="delete", description="Delete a task")
@@ -992,7 +998,7 @@ class TasksCog(commands.Cog, name="Tasks"):
             return
             
         user_id_str = str(interaction.user.id)
-        if task.get("user_id") != user_id_str and user_id_str not in task.get("shared_with", []):
+        if task.get("user_id") != user_id_str and user_id_str not in (task.get("shared_with") or []):
             await interaction.response.send_message("❌ You do not have permission to complete this task.", ephemeral=True)
             return
             
