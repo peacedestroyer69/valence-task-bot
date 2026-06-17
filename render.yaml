@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: ypt-study-bot
+    repo: https://github.com/peacedestroyer69/valence-study-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: LEADERBOARD_CHANNEL_ID
+        sync: false
+      - key: LOG_CHANNEL_ID
+        sync: false
+      - key: CELEBRATION_CHANNEL_ID
+        sync: false
+      - key: FIREBASE_CREDENTIALS
+        sync: false
+
+  - type: web
+    name: valence-task-bot
+    repo: https://github.com/peacedestroyer69/valence-task-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python task_bot.py
+    envVars:
+      - key: TASK_BOT_TOKEN
+        sync: false
+      - key: FIREBASE_CREDENTIALS
+        sync: false
