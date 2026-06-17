@@ -42,8 +42,14 @@ async def handle_root(request):
 async def handle_health(request):
     return web.json_response({"status": "ok"})
 
+_keepalive_started = False
+
 async def start_keepalive_server():
     """Starts a separate aiohttp web server for uptime monitoring."""
+    global _keepalive_started
+    if _keepalive_started:
+        return None
+    _keepalive_started = True
     app = web.Application()
     app.router.add_get("/", handle_root)
     app.router.add_get("/health", handle_health)
@@ -153,6 +159,12 @@ async def on_message(message: discord.Message):
                 except Exception as e:
                     logger.error(f"Could not send DM report to user {r_user_id}: {e}")
 
+async def main():
+    await start_keepalive_server()
+    token = os.getenv("TASK_BOT_TOKEN")
+    async with bot:
+        await bot.start(token)
+
 # Entry point
 if __name__ == "__main__":
     token = os.getenv("TASK_BOT_TOKEN")
@@ -160,4 +172,4 @@ if __name__ == "__main__":
         logger.critical("TASK_BOT_TOKEN is not set in environment variables. Exiting.")
     else:
         logger.info("Starting Task Bot...")
-        bot.run(token)
+        asyncio.run(main())
