@@ -85,24 +85,35 @@ async def load_extensions():
 
 @bot.event
 async def setup_hook():
-    """Performs async bot initialization: loading cogs, starting web server, and syncing slash commands."""
+    """Performs async bot initialization: loading cogs and starting web server.
+    
+    Slash command syncing is handled by the SyncCog (!sync command) to avoid
+    the auto-sync anti-pattern that causes duplicate commands and rate limits.
+    A one-time first-boot sync is performed when FIRST_BOOT_SYNC=1 is set.
+    """
     await load_extensions()
     bot.keepalive_runner = await start_keepalive_server()
     
-    try:
-        guild_id = int(os.getenv("GUILD_ID", "1514186381348306964"))
-        target_guild = discord.Object(id=guild_id)
-        
-        # Sync command tree to target guild
-        synced = await bot.tree.sync(guild=target_guild)
-        logger.info(f"Successfully synced {len(synced)} command(s) to target guild (ID: {guild_id})")
-        
-        # Clear global commands once to prevent legacy duplicates (since commands are guild-only)
-        bot.tree.clear_commands(guild=None)
-        await bot.tree.sync()
-        logger.info("Successfully cleared global commands to prevent duplicates.")
-    except Exception as e:
-        logger.error(f"Error during slash command synchronization in setup_hook: {e}", exc_info=True)
+    # One-time first-boot sync: clears stale global commands and syncs guild tree.
+    # Set FIRST_BOOT_SYNC=1 in Render env vars, then remove it after first successful boot.
+    # For ongoing syncing, use the !sync prefix command instead.
+    if os.getenv("FIRST_BOOT_SYNC", "0") == "1":
+        try:
+            guild_id = int(os.getenv("GUILD_ID", "1514186381348306964"))
+            target_guild = discord.Object(id=guild_id)
+            
+            # Step 1: Clear any stale global commands (prevents duplicates)
+            bot.tree.clear_commands(guild=None)
+            await bot.tree.sync()
+            logger.info("First-boot: cleared global commands.")
+            
+            # Step 2: Sync the guild command tree (instant propagation)
+            synced = await bot.tree.sync(guild=target_guild)
+            logger.info(f"First-boot: synced {len(synced)} command(s) to guild {guild_id}.")
+        except Exception as e:
+            logger.error(f"First-boot sync error: {e}", exc_info=True)
+    else:
+        logger.info("Skipping auto-sync (use !sync command for manual syncing).")
 
 
 @bot.event
