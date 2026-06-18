@@ -50,15 +50,22 @@ class AddSubtaskModal(discord.ui.Modal, title="➕ Add Subtask Checklist Item"):
 class ToggleSubtaskSelect(discord.ui.Select):
     def __init__(self, checklist, parent_view):
         options = []
-        for i, item in enumerate(checklist):
+        display_list = checklist[:25]  # Discord hard limit: 25 options max
+        for i, item in enumerate(display_list):
             status_emoji = "✅" if item.get("done") else "⬜"
+            label = f"{i+1}. {item.get('item', '')[:60]}"
+            if not label.strip() or label == f"{i+1}. ":
+                label = f"{i+1}. (unnamed subtask)"
             options.append(discord.SelectOption(
-                label=f"{i+1}. {item.get('item')[:70]}",
+                label=label,
                 value=str(i),
                 emoji=status_emoji
             ))
+        placeholder = "Select a subtask to toggle..."
+        if len(checklist) > 25:
+            placeholder = f"Select a subtask to toggle... (+{len(checklist)-25} more)"
         super().__init__(
-            placeholder="Select a subtask checklist item to toggle...",
+            placeholder=placeholder,
             options=options,
             min_values=1,
             max_values=1
@@ -87,11 +94,21 @@ class ToggleSubtaskSelect(discord.ui.Select):
 class TaskDetailView(discord.ui.View):
     """View managing the interactive detailed task view card."""
     def __init__(self, task, caller_id):
-        super().__init__(timeout=120)
+        super().__init__(timeout=180)
         self.task = task
         self.task_id = task.get("task_id")
         self.caller_id = caller_id
+        self.message = None
         self.update_buttons()
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        try:
+            if self.message:
+                await self.message.edit(view=self)
+        except Exception:
+            pass
 
     def update_buttons(self):
         self.clear_items()
@@ -128,9 +145,14 @@ class TaskDetailView(discord.ui.View):
         visibility_lbl = "🔒 **Private**" if t.get("is_private") else "🔓 **Public**"
         category = f"📁 `{t.get('category', 'General').upper()}`"
         
+        # Truncate description to prevent embed overflow (Discord 1024-char field limit)
+        desc = t.get("description") or "*No description provided.*"
+        if len(desc) > 1000:
+            desc = desc[:997] + "..."
+        
         embed = discord.Embed(
-            title=f"📋 Task details: {t.get('title')}",
-            description=t.get("description") or "*No description provided.*",
+            title=f"📋 Task details: {t.get('title', 'Untitled')[:100]}",
+            description=desc,
             color=color
         )
         
@@ -155,7 +177,7 @@ class TaskDetailView(discord.ui.View):
         poms_icons = "🍅" * pomodoro_completed + "⚫" * max(0, pomodoro_estimate - pomodoro_completed)
         embed.add_field(name="🍅 Pomodoro Sessions", value=f"{poms_icons} *({pomodoro_completed}/{pomodoro_estimate} poms)*", inline=False)
     
-        # Subtask Checklist with progress bar
+        # Subtask Checklist with progress bar (truncated to prevent embed overflow)
         checklist = t.get("checklist") or []
         if checklist:
             done_count = sum(1 for x in checklist if x.get("done") or x.get("completed"))
@@ -168,14 +190,22 @@ class TaskDetailView(discord.ui.View):
             pct = int((done_count / total_count) * 100)
             
             lines = []
-            for i, x in enumerate(checklist, start=1):
+            display_items = checklist[:15]  # Show max 15 to prevent overflow
+            for i, x in enumerate(display_items, start=1):
                 is_done = x.get("done") or x.get("completed")
+                item_text = (x.get('item') or '(unnamed)')[:60]
                 if is_done:
-                    lines.append(f"☑️ ~~`{i}.` {x.get('item')}~~")
+                    lines.append(f"☑️ ~~`{i}.` {item_text}~~")
                 else:
-                    lines.append(f"⬜ `{i}.` {x.get('item')}")
+                    lines.append(f"⬜ `{i}.` {item_text}")
+            
+            if len(checklist) > 15:
+                lines.append(f"*... and {len(checklist) - 15} more items*")
                     
-            checklist_val = f"`{bar}` **{pct}%**\n\n" + "\n".join(lines)
+            checklist_val = f"`{bar}` **{pct}%** ({done_count}/{total_count})\n\n" + "\n".join(lines)
+            # Final safety truncation for Discord 1024-char field limit
+            if len(checklist_val) > 1020:
+                checklist_val = checklist_val[:1017] + "..."
             embed.add_field(name="📝 Checklist Progress", value=checklist_val, inline=False)
             
         return embed
@@ -259,7 +289,7 @@ class TaskDetailView(discord.ui.View):
 class TaskPaginationView(discord.ui.View):
     """Pagination view listing multiple tasks."""
     def __init__(self, tasks_list, target_user, caller_id, per_page=5):
-        super().__init__(timeout=60.0)
+        super().__init__(timeout=120.0)
         self.tasks = tasks_list
         self.target_user = target_user
         self.caller_id = caller_id
@@ -268,6 +298,15 @@ class TaskPaginationView(discord.ui.View):
         self.total_pages = max(1, (len(tasks_list) + per_page - 1) // per_page)
         self.message = None
         self.update_buttons()
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        try:
+            if self.message:
+                await self.message.edit(view=self)
+        except Exception:
+            pass
 
     def update_buttons(self):
         self.prev_button.disabled = (self.current_page <= 1)
@@ -336,9 +375,19 @@ class TaskPaginationView(discord.ui.View):
 class DMSnoozeView(discord.ui.View):
     """View sent in DMs allowing the user to complete or snooze a task alert."""
     def __init__(self, task_id, user_id):
-        super().__init__(timeout=86400) # long timeout
+        super().__init__(timeout=3600)  # 1 hour timeout (was 24h — memory leak risk)
         self.task_id = task_id
         self.user_id = str(user_id)
+        self.message = None
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        try:
+            if self.message:
+                await self.message.edit(view=self)
+        except Exception:
+            pass
 
     @discord.ui.button(label="Complete", style=discord.ButtonStyle.green)
     async def btn_complete(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -559,6 +608,16 @@ class DMHomeView(discord.ui.View):
         super().__init__(timeout=300)
         self.user = user
         self.cog = cog
+        self.message = None
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        try:
+            if self.message:
+                await self.message.edit(view=self)
+        except Exception:
+            pass
         
     @discord.ui.button(label="📋 View Pending", style=discord.ButtonStyle.primary, emoji="📋")
     async def btn_pending(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -590,7 +649,9 @@ class DMHomeView(discord.ui.View):
         completed = [t for t in tasks_list if t.get("status") == "completed"]
         file = await asyncio.to_thread(self.cog.generate_productivity_chart, completed)
         
-        color = 0x5865F2 if user_id_str == "856485470171299891" else 0xEB459E
+        report_users_str = os.getenv("REPORT_USERS", "856485470171299891,1403716456025165864")
+        report_users = [int(uid.strip()) for uid in report_users_str.split(",") if uid.strip()]
+        color = 0x5865F2 if int(user_id_str) in report_users else 0xEB459E
         embed = discord.Embed(
             title="📈 Weekly Productivity Report",
             description="Your daily completed task trends over the last 7 days.",
@@ -781,6 +842,9 @@ class FocusGroup(app_commands.Group):
         if duration <= 0:
             await interaction.response.send_message("❌ Duration must be a positive integer.", ephemeral=True)
             return
+        if duration > 480:
+            await interaction.response.send_message("❌ Maximum focus duration is 480 minutes (8 hours).", ephemeral=True)
+            return
 
         task = await asyncio.to_thread(task_db.get_task, task_id)
         if not task:
@@ -910,6 +974,10 @@ class TasksCog(commands.Cog, name="Tasks"):
         except Exception as e:
             logger.error(f"[HABITS] Error during habit resets: {e}")
 
+    @habit_reset_loop.before_loop
+    async def before_habit_reset_loop(self):
+        await self.bot.wait_until_ready()
+
     @tasks.loop(minutes=1)
     async def reminder_task(self):
         """Background pending task due warnings (due in < 1h) and custom reminders."""
@@ -985,13 +1053,23 @@ class TasksCog(commands.Cog, name="Tasks"):
         except Exception as e:
             logger.error(f"[REMINDER] Error in loop: {e}")
 
+    @reminder_task.before_loop
+    async def before_reminder_task(self):
+        await self.bot.wait_until_ready()
+
     @tasks.loop(hours=1)
     async def planner_alerts_task(self):
         """Hourly background task managing morning agendas, streak nudges, and weekly digests in IST."""
         now = task_db.get_ist_now()
         logger.info(f"[PLANNER] Running hourly planner checks (IST Hour: {now.hour}, Day: {now.weekday()})...")
         
-        user_ids = ["856485470171299891", "1403716456025165864"]
+        # Dynamically fetch all user IDs from the database (no more hardcoded list)
+        try:
+            all_users = await asyncio.to_thread(task_db.get_leaderboard)
+            user_ids = [u["user_id"] for u in all_users] if all_users else []
+        except Exception as e:
+            logger.error(f"[PLANNER] Error fetching user list: {e}")
+            user_ids = []
         
         # 1. Daily Morning Agenda DM (8:00 AM IST)
         if now.hour == 8:
@@ -1089,6 +1167,10 @@ class TasksCog(commands.Cog, name="Tasks"):
                     logger.info(f"[PLANNER] Weekly digest DM sent to user {uid_str}")
                 except Exception as e:
                     logger.error(f"[PLANNER] Failed to send weekly digest to user {uid_str}: {e}")
+
+    @planner_alerts_task.before_loop
+    async def before_planner_alerts_task(self):
+        await self.bot.wait_until_ready()
 
     # --- Subcommands ---
 
@@ -1299,7 +1381,8 @@ class TasksCog(commands.Cog, name="Tasks"):
         status="Filter tasks by status",
         category="Filter tasks by category",
         priority="Filter tasks by priority",
-        show_private="Show your private tasks (Forces ephemeral view)"
+        show_private="Show your private tasks (Forces ephemeral view)",
+        sort_by="Sort tasks by this field"
     )
     @app_commands.choices(
         status=[
@@ -1310,10 +1393,16 @@ class TasksCog(commands.Cog, name="Tasks"):
             app_commands.Choice(name="Low", value="Low"),
             app_commands.Choice(name="Medium", value="Medium"),
             app_commands.Choice(name="High", value="High")
+        ],
+        sort_by=[
+            app_commands.Choice(name="Priority (High→Low)", value="priority"),
+            app_commands.Choice(name="Due Date (Earliest)", value="due_date"),
+            app_commands.Choice(name="Created (Newest)", value="created_at")
         ]
     )
     async def task_list(self, interaction: discord.Interaction, status: str = None, 
-                        category: str = None, priority: str = None, show_private: bool = False):
+                        category: str = None, priority: str = None, show_private: bool = False,
+                        sort_by: str = None):
         
         user_id_str = str(interaction.user.id)
         tasks_list = await asyncio.to_thread(task_db.get_user_tasks, user_id_str, status, category, priority)
@@ -1326,6 +1415,15 @@ class TasksCog(commands.Cog, name="Tasks"):
                     filtered.append(t)
             else:
                 filtered.append(t)
+
+        # Apply sorting
+        if sort_by == "priority":
+            prio_map = {"High": 3, "Medium": 2, "Low": 1}
+            filtered.sort(key=lambda x: prio_map.get(x.get("priority", "Medium"), 2), reverse=True)
+        elif sort_by == "due_date":
+            filtered.sort(key=lambda x: x.get("due_date") or "9999-99-99")
+        elif sort_by == "created_at":
+            filtered.sort(key=lambda x: x.get("created_at") or "", reverse=True)
                 
         if not filtered:
             await interaction.response.send_message("📝 No tasks found matching your filters.", ephemeral=show_private)
@@ -1387,7 +1485,7 @@ class TasksCog(commands.Cog, name="Tasks"):
         report_users_str = os.getenv("REPORT_USERS", "856485470171299891,1403716456025165864")
         report_users = [int(uid.strip()) for uid in report_users_str.split(",") if uid.strip()]
         
-        color = 0x5865F2 if user_id_str in report_users else 0xEB459E
+        color = 0x5865F2 if int(user_id_str) in report_users else 0xEB459E
         
         embed = discord.Embed(
             title=f"🛡️ Character Profile — {interaction.user.display_name}",
@@ -1447,7 +1545,9 @@ class TasksCog(commands.Cog, name="Tasks"):
         
         file = await asyncio.to_thread(self.generate_productivity_chart, completed)
         
-        color = 0x5865F2 if user_id_str == "856485470171299891" else 0xEB459E
+        report_users_str = os.getenv("REPORT_USERS", "856485470171299891,1403716456025165864")
+        report_users = [int(uid.strip()) for uid in report_users_str.split(",") if uid.strip()]
+        color = 0x5865F2 if int(user_id_str) in report_users else 0xEB459E
         embed = discord.Embed(
             title="📈 Weekly Productivity Report",
             description="Your daily completed task trends over the last 7 days.",
@@ -1537,12 +1637,319 @@ class TasksCog(commands.Cog, name="Tasks"):
         else:
             await interaction.response.send_message("❌ Failed to set reminder.", ephemeral=True)
 
+    # 14. REOPEN TASK
+    @task_group.command(name="reopen", description="Reopen a completed task back to pending")
+    @app_commands.describe(task_id="The UUID of the completed task")
+    @app_commands.autocomplete(task_id=task_id_autocomplete)
+    async def task_reopen(self, interaction: discord.Interaction, task_id: str):
+        task = await asyncio.to_thread(task_db.get_task, task_id)
+        if not task:
+            await interaction.response.send_message("❌ Task not found.", ephemeral=True)
+            return
+        if task.get("user_id") != str(interaction.user.id):
+            await interaction.response.send_message("❌ You are not the owner of this task.", ephemeral=True)
+            return
+        if task.get("status") != "completed":
+            await interaction.response.send_message("⚠️ This task is already pending.", ephemeral=True)
+            return
+
+        success = await asyncio.to_thread(task_db.reopen_task, task_id)
+        if success:
+            embed = discord.Embed(
+                title="🔄 Task Reopened",
+                description=f"**{task.get('title')}** has been set back to pending.",
+                color=discord.Color.blue()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=task.get("is_private"))
+        else:
+            await interaction.response.send_message("❌ Failed to reopen task.", ephemeral=True)
+
+    # 15. TODAY VIEW
+    @task_group.command(name="today", description="See today's tasks, habits, and overdue items")
+    async def task_today(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        user_id_str = str(interaction.user.id)
+        today_tasks = await asyncio.to_thread(task_db.get_today_tasks, user_id_str)
+
+        report_users_str = os.getenv("REPORT_USERS", "856485470171299891,1403716456025165864")
+        report_users = [int(uid.strip()) for uid in report_users_str.split(",") if uid.strip()]
+        color = 0x5865F2 if interaction.user.id in report_users else 0xEB459E
+
+        embed = discord.Embed(
+            title=f"📅 Today's Focus — {interaction.user.display_name}",
+            color=color
+        )
+
+        if not today_tasks:
+            embed.description = "✨ You're all caught up! No tasks due today."
+            await interaction.followup.send(embed=embed)
+            return
+
+        now = task_db.get_ist_now()
+        overdue = []
+        due_today = []
+        habits = []
+
+        for t in today_tasks:
+            if t.get("is_habit"):
+                habits.append(t)
+            elif t.get("due_date"):
+                parsed = None
+                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+                    try:
+                        parsed = datetime.datetime.strptime(t["due_date"].strip(), fmt)
+                        break
+                    except ValueError:
+                        continue
+                if parsed and parsed < now:
+                    overdue.append(t)
+                else:
+                    due_today.append(t)
+            else:
+                due_today.append(t)
+
+        if overdue:
+            lines = [f"🔴 **{t['title']}** — Due: `{t.get('due_date')}`" for t in overdue[:5]]
+            embed.add_field(name=f"⚠️ Overdue ({len(overdue)})", value="\n".join(lines), inline=False)
+
+        if habits:
+            lines = [f"🔁 **{t['title']}** ({t.get('recurrence', 'daily')})" for t in habits[:5]]
+            embed.add_field(name=f"🔁 Today's Habits ({len(habits)})", value="\n".join(lines), inline=False)
+
+        if due_today:
+            lines = []
+            for t in due_today[:5]:
+                prio = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}.get(t.get("priority"), "🟡")
+                due = f" — Due: `{t.get('due_date')}`" if t.get("due_date") else ""
+                lines.append(f"{prio} **{t['title']}**{due}")
+            embed.add_field(name=f"📋 Due Today ({len(due_today)})", value="\n".join(lines), inline=False)
+
+        if not overdue and not habits and not due_today:
+            embed.description = "✨ Nothing specific for today!"
+
+        embed.set_footer(text=f"Total: {len(today_tasks)} items • Use /task view to manage")
+        await interaction.followup.send(embed=embed)
+
+    # 16. OVERDUE VIEW
+    @task_group.command(name="overdue", description="List all overdue pending tasks")
+    async def task_overdue(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        user_id_str = str(interaction.user.id)
+        overdue_tasks = await asyncio.to_thread(task_db.get_overdue_tasks, user_id_str)
+
+        if not overdue_tasks:
+            await interaction.followup.send("✅ No overdue tasks! You're on track.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title=f"⚠️ Overdue Tasks ({len(overdue_tasks)})",
+            color=discord.Color.red()
+        )
+        lines = []
+        now = task_db.get_ist_now()
+        for t in overdue_tasks[:15]:
+            due = t.get("due_date", "")
+            prio = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}.get(t.get("priority"), "🟡")
+            lines.append(f"{prio} **{t['title']}** — Due: `{due}` | ID: `{t['task_id'][:8]}`")
+
+        embed.description = "\n".join(lines)
+        if len(overdue_tasks) > 15:
+            embed.set_footer(text=f"Showing 15 of {len(overdue_tasks)} overdue tasks")
+        await interaction.followup.send(embed=embed)
+
+    # 17. SEARCH
+    @task_group.command(name="search", description="Search your tasks by keyword")
+    @app_commands.describe(query="Search keyword to match against task titles and descriptions")
+    async def task_search(self, interaction: discord.Interaction, query: str):
+        await interaction.response.defer(ephemeral=True)
+        user_id_str = str(interaction.user.id)
+        results = await asyncio.to_thread(task_db.search_tasks, user_id_str, query)
+
+        if not results:
+            await interaction.followup.send(f"🔍 No tasks found matching `{query}`.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title=f"🔍 Search Results for \"{query}\"",
+            color=discord.Color.blurple()
+        )
+        lines = []
+        for t in results[:15]:
+            status = "✅" if t.get("status") == "completed" else "⏳"
+            prio = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}.get(t.get("priority"), "🟡")
+            lines.append(f"{status}{prio} **{t['title'][:60]}** | `{t['task_id'][:8]}`")
+
+        embed.description = "\n".join(lines)
+        embed.set_footer(text=f"Found {len(results)} result(s)")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # 18. UNSHARE
+    @task_group.command(name="unshare", description="Remove a user from a shared task")
+    @app_commands.describe(task_id="The UUID of the task", user="The user to remove")
+    @app_commands.autocomplete(task_id=task_id_autocomplete)
+    async def task_unshare(self, interaction: discord.Interaction, task_id: str, user: discord.Member):
+        task = await asyncio.to_thread(task_db.get_task, task_id)
+        if not task:
+            await interaction.response.send_message("❌ Task not found.", ephemeral=True)
+            return
+        if task.get("user_id") != str(interaction.user.id):
+            await interaction.response.send_message("❌ You are not the owner of this task.", ephemeral=True)
+            return
+
+        shared_list = task.get("shared_with") or []
+        uid_str = str(user.id)
+        if uid_str not in shared_list:
+            await interaction.response.send_message(f"⚠️ {user.display_name} is not on this task's share list.", ephemeral=True)
+            return
+
+        shared_list.remove(uid_str)
+        await asyncio.to_thread(task_db.update_task, task_id, {"shared_with": shared_list})
+        await interaction.response.send_message(f"🔓 Removed {user.mention} from **{task['title']}**.")
+
+    # 19. DUPLICATE
+    @task_group.command(name="duplicate", description="Clone a task with all its details")
+    @app_commands.describe(task_id="The UUID of the task to clone")
+    @app_commands.autocomplete(task_id=task_id_autocomplete)
+    async def task_duplicate(self, interaction: discord.Interaction, task_id: str):
+        task = await asyncio.to_thread(task_db.get_task, task_id)
+        if not task:
+            await interaction.response.send_message("❌ Task not found.", ephemeral=True)
+            return
+        if task.get("user_id") != str(interaction.user.id):
+            await interaction.response.send_message("❌ You are not the owner of this task.", ephemeral=True)
+            return
+
+        # Reset checklist items to uncompleted
+        checklist = task.get("checklist") or []
+        reset_checklist = [{"item": c.get("item", ""), "done": False} for c in checklist]
+
+        new_id = await asyncio.to_thread(
+            task_db.add_task,
+            user_id=str(interaction.user.id),
+            title=f"{task.get('title', '')} (Copy)",
+            description=task.get("description", ""),
+            due_date=task.get("due_date"),
+            priority=task.get("priority", "Medium"),
+            category=task.get("category", "General"),
+            is_private=task.get("is_private", False),
+            recurrence=task.get("recurrence", "none"),
+            is_habit=task.get("is_habit", False),
+            pomodoros_estimated=task.get("pomodoros_estimated", 1)
+        )
+        # Copy checklist to the new task
+        if reset_checklist:
+            await asyncio.to_thread(task_db.update_task, new_id, {"checklist": reset_checklist})
+
+        embed = discord.Embed(
+            title="📋 Task Duplicated",
+            description=f"Cloned **{task.get('title')}** → New ID: `{new_id[:8]}`",
+            color=discord.Color.green()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=task.get("is_private"))
+
+    # 20. TASK NOTES
+    @task_group.command(name="note", description="Add a timestamped progress note to a task")
+    @app_commands.describe(task_id="The UUID of the task", text="Your note text")
+    @app_commands.autocomplete(task_id=task_id_autocomplete)
+    async def task_note(self, interaction: discord.Interaction, task_id: str, text: str):
+        task = await asyncio.to_thread(task_db.get_task, task_id)
+        if not task:
+            await interaction.response.send_message("❌ Task not found.", ephemeral=True)
+            return
+
+        user_id_str = str(interaction.user.id)
+        is_owner = task.get("user_id") == user_id_str
+        is_shared = user_id_str in (task.get("shared_with") or [])
+        if not is_owner and not is_shared:
+            await interaction.response.send_message("❌ You don't have access to this task.", ephemeral=True)
+            return
+
+        success = await asyncio.to_thread(task_db.add_task_note, task_id, text)
+        if success:
+            embed = discord.Embed(
+                title="📝 Note Added",
+                description=f"Added note to **{task.get('title')}**:\n> {text[:200]}",
+                color=discord.Color.green()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=task.get("is_private"))
+        else:
+            await interaction.response.send_message("❌ Failed to add note.", ephemeral=True)
+
+    # 21. STATS
+    @task_group.command(name="stats", description="View your detailed productivity statistics")
+    async def task_stats(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        user_id_str = str(interaction.user.id)
+        profile = await asyncio.to_thread(task_db.get_user_profile, user_id_str)
+        all_tasks = await asyncio.to_thread(task_db.get_user_tasks, user_id_str)
+
+        total = len(all_tasks)
+        completed = [t for t in all_tasks if t.get("status") == "completed"]
+        pending = [t for t in all_tasks if t.get("status") == "pending"]
+        completion_rate = (len(completed) / total * 100) if total > 0 else 0
+
+        # Category breakdown
+        categories = {}
+        for t in all_tasks:
+            cat = t.get("category", "General")
+            categories[cat] = categories.get(cat, 0) + 1
+
+        cat_lines = [f"• `{cat}`: **{count}** tasks" for cat, count in sorted(categories.items(), key=lambda x: x[1], reverse=True)[:6]]
+
+        # Most productive day of week
+        day_counts = {i: 0 for i in range(7)}
+        for t in completed:
+            comp = t.get("completed_at", "")
+            if comp:
+                try:
+                    dt = datetime.datetime.fromisoformat(comp)
+                    day_counts[dt.weekday()] += 1
+                except (ValueError, TypeError):
+                    pass
+        day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        best_day_idx = max(day_counts, key=day_counts.get)
+        best_day = day_names[best_day_idx] if day_counts[best_day_idx] > 0 else "N/A"
+
+        # Badges
+        try:
+            badges = await asyncio.to_thread(task_db.get_user_badges, user_id_str)
+        except Exception:
+            badges = []
+
+        report_users_str = os.getenv("REPORT_USERS", "856485470171299891,1403716456025165864")
+        report_users = [int(uid.strip()) for uid in report_users_str.split(",") if uid.strip()]
+        color = 0x5865F2 if interaction.user.id in report_users else 0xEB459E
+
+        embed = discord.Embed(
+            title=f"📊 Productivity Stats — {interaction.user.display_name}",
+            color=color
+        )
+        embed.add_field(name="📋 Total Tasks", value=f"**{total}**", inline=True)
+        embed.add_field(name="✅ Completed", value=f"**{len(completed)}**", inline=True)
+        embed.add_field(name="⏳ Pending", value=f"**{len(pending)}**", inline=True)
+        embed.add_field(name="📈 Completion Rate", value=f"**{completion_rate:.1f}%**", inline=True)
+        embed.add_field(name="🔥 Current Streak", value=f"**{profile.get('streak', 0)} days**", inline=True)
+        embed.add_field(name="🏆 Best Streak", value=f"**{profile.get('best_streak', 0)} days**", inline=True)
+        embed.add_field(name="⭐ Best Day", value=f"**{best_day}** ({day_counts[best_day_idx]} tasks)", inline=True)
+        embed.add_field(name="🛡️ Level", value=f"**{profile.get('level', 1)}**", inline=True)
+        embed.add_field(name="❄️ Streak Freezes", value=f"**{profile.get('streak_freezes', 0)}**", inline=True)
+
+        if cat_lines:
+            embed.add_field(name="📂 Categories", value="\n".join(cat_lines), inline=False)
+
+        if badges:
+            embed.add_field(name="🏅 Badges", value=" ".join(badges[:10]), inline=False)
+
+        await interaction.followup.send(embed=embed)
+
     # --- Helper Logic methods ---
 
     def parse_due_date_input(self, due_str: str) -> datetime.datetime:
-        due_str = due_str.strip().lower()
+        original = due_str.strip()
+        due_str = original.lower()
         now = task_db.get_ist_now()
         
+        # Relative time: "2h", "10m", "3d", "in 2 hours"
         match = re.match(r'^in\s+(\d+)\s*(h|hour|hours|m|min|mins|d|day|days)$', due_str)
         if not match:
             match = re.match(r'^(\d+)\s*(h|hour|hours|m|min|mins|d|day|days)$', due_str)
@@ -1560,7 +1967,45 @@ class TasksCog(commands.Cog, name="Tasks"):
         if due_str == 'tomorrow':
             tomorrow = now + datetime.timedelta(days=1)
             return tomorrow.replace(hour=12, minute=0, second=0, microsecond=0)
-            
+
+        # AM/PM support: "3pm", "3:00pm", "3:00 PM", "15:30"
+        am_pm_match = re.match(r'^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$', due_str)
+        if am_pm_match:
+            hour = int(am_pm_match.group(1))
+            minute = int(am_pm_match.group(2) or 0)
+            period = am_pm_match.group(3)
+            if period == 'pm' and hour != 12:
+                hour += 12
+            elif period == 'am' and hour == 12:
+                hour = 0
+            result = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if result <= now:
+                result += datetime.timedelta(days=1)
+            return result
+
+        # 24-hour time: "15:30", "9:00"
+        time_match = re.match(r'^(\d{1,2}):(\d{2})$', due_str)
+        if time_match:
+            hour = int(time_match.group(1))
+            minute = int(time_match.group(2))
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                result = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if result <= now:
+                    result += datetime.timedelta(days=1)
+                return result
+
+        # "next monday", "next tuesday", etc.
+        next_day_match = re.match(r'^next\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)$', due_str)
+        if next_day_match:
+            day_map = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6}
+            target_day = day_map[next_day_match.group(1)]
+            days_ahead = (target_day - now.weekday()) % 7
+            if days_ahead == 0:
+                days_ahead = 7
+            result = now + datetime.timedelta(days=days_ahead)
+            return result.replace(hour=12, minute=0, second=0, microsecond=0)
+
+        # Absolute formats
         for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
             try:
                 dt = datetime.datetime.strptime(due_str, fmt)
@@ -1628,7 +2073,7 @@ class TasksCog(commands.Cog, name="Tasks"):
         for t in completed_tasks:
             comp_at = t.get("completed_at")
             if comp_at:
-                c_date = comp_at.split("T")[0]
+                c_date = comp_at[:10]  # Works for both "2026-06-18T14:30" and "2026-06-18 14:30"
                 if c_date in counts:
                     counts[c_date] += 1
                     
@@ -1665,6 +2110,8 @@ class TasksCog(commands.Cog, name="Tasks"):
         buf = io.BytesIO()
         fig.savefig(buf, format='png', dpi=150)
         buf.seek(0)
+        fig.clear()
+        del fig
         
         return discord.File(fp=buf, filename="productivity_graph.png")
 
@@ -1676,8 +2123,6 @@ class TasksCog(commands.Cog, name="Tasks"):
             return
             
         user_id_str = str(message.author.id)
-        if user_id_str not in ["856485470171299891", "1403716456025165864"]:
-            return
             
         content = message.content.strip().lower()
         if content not in ["home", "panel", "menu", "help", "tasks", "start", "!home", "!panel"]:
@@ -1685,7 +2130,9 @@ class TasksCog(commands.Cog, name="Tasks"):
             
         # Reply with the interactive DM Home Panel
         profile = await asyncio.to_thread(task_db.get_user_profile, user_id_str)
-        color = 0x5865F2 if user_id_str == "856485470171299891" else 0xEB459E
+        report_users_str = os.getenv("REPORT_USERS", "856485470171299891,1403716456025165864")
+        report_users = [int(uid.strip()) for uid in report_users_str.split(",") if uid.strip()]
+        color = 0x5865F2 if int(user_id_str) in report_users else 0xEB459E
         
         embed = discord.Embed(
             title="🤖 Valence Task Bot DM Assistant",
