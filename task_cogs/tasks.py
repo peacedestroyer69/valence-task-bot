@@ -865,15 +865,40 @@ class FocusGroup(app_commands.Group):
             
         await self.cog.start_focus_timer(interaction, task, duration)
 
-    @app_commands.command(name="cancel", description="Cancel your active focus session")
+    @app_commands.command(name="cancel", description="Cancel your active focus session (partial XP if >5min)")
     async def focus_cancel(self, interaction: discord.Interaction):
         user_id = interaction.user.id
         if user_id not in self.cog.active_focus_sessions:
             await interaction.response.send_message("❌ You do not have an active focus session.", ephemeral=True)
             return
-        loop_task = self.cog.active_focus_sessions.pop(user_id)
+        
+        session = self.cog.active_focus_sessions.pop(user_id)
+        loop_task = session["task"]
+        start_time = session["start_time"]
+        duration = session["duration"]
+        task_title = session.get("title", "Unknown")
         loop_task.cancel()
-        await interaction.response.send_message("🛑 Focus session cancelled successfully. No XP awarded.", ephemeral=True)
+
+        # Calculate partial XP based on elapsed time
+        elapsed_mins = (task_db.get_ist_now() - start_time).total_seconds() / 60
+        if elapsed_mins >= 5:
+            # Award partial XP: proportional to time spent (max 50 XP for full session)
+            partial_xp = int(min(50, (elapsed_mins / duration) * 50))
+            new_xp, new_level, leveled_up = await asyncio.to_thread(task_db.add_xp, str(user_id), partial_xp)
+            embed = discord.Embed(
+                title="⏹️ Focus Session Ended Early",
+                description=f"Focused on **{task_title}** for **{int(elapsed_mins)}** of {duration} minutes.",
+                color=discord.Color.orange()
+            )
+            embed.add_field(name="Partial XP", value=f"✨ +{partial_xp} XP (proportional)")
+            if leveled_up:
+                embed.add_field(name="🚀 LEVEL UP!", value=f"You reached **Level {new_level}**!")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message(
+                f"🛑 Focus session cancelled ({int(elapsed_mins)}min < 5min minimum). No XP awarded.", 
+                ephemeral=True
+            )
 
 
 # --- Tasks Cog Class ---
@@ -1363,7 +1388,37 @@ class TasksCog(commands.Cog, name="Tasks"):
         if not success:
             await interaction.response.send_message("❌ Failed to complete task. Is it already completed?", ephemeral=True)
             return
-            
+
+        # --- Auto-Award Badges ---
+        badge_msgs = []
+        try:
+            profile = await asyncio.to_thread(task_db.get_user_profile, user_id_str)
+            tc = profile.get("total_completed", 0)
+            streak = profile.get("streak", 0)
+            level = profile.get("level", 1)
+
+            badge_map = [
+                (tc >= 1, "🌱 First Task"),
+                (tc >= 10, "⚡ 10 Tasks"),
+                (tc >= 25, "🎯 25 Tasks"),
+                (tc >= 50, "💎 50 Tasks"),
+                (tc >= 100, "💯 Century Club"),
+                (streak >= 3, "🔥 3-Day Streak"),
+                (streak >= 7, "🔥 7-Day Streak"),
+                (streak >= 14, "🔥 14-Day Streak"),
+                (streak >= 30, "🏆 30-Day Streak"),
+                (level >= 5, "🛡️ Level 5"),
+                (level >= 10, "⚔️ Level 10"),
+                (level >= 20, "👑 Level 20"),
+            ]
+            for condition, badge in badge_map:
+                if condition:
+                    awarded = await asyncio.to_thread(task_db.add_badge, user_id_str, badge)
+                    if awarded:
+                        badge_msgs.append(badge)
+        except Exception as e:
+            logger.error(f"[BADGES] Error awarding badges: {e}")
+
         embed = discord.Embed(
             title="🎉 Task Completed!",
             description=f"**{completed_task['title']}**",
@@ -1372,6 +1427,9 @@ class TasksCog(commands.Cog, name="Tasks"):
         embed.add_field(name="XP Gained", value=f"✨ +{stats['xp_gained']} XP")
         embed.add_field(name="Daily Streak", value=f"🔥 {stats['streak']} days")
         embed.add_field(name="New Level", value=f"📈 Level {stats['new_level']}")
+
+        if badge_msgs:
+            embed.add_field(name="🏅 New Badges Unlocked!", value="\n".join(badge_msgs), inline=False)
         
         await interaction.response.send_message(embed=embed, ephemeral=completed_task.get("is_private"))
 
@@ -1942,6 +2000,211 @@ class TasksCog(commands.Cog, name="Tasks"):
 
         await interaction.followup.send(embed=embed)
 
+    # 22. STREAK FREEZE
+    @task_group.command(name="freeze", description="Use a streak freeze to protect your streak for today")
+    async def task_freeze(self, interaction: discord.Interaction):
+        user_id_str = str(interaction.user.id)
+        profile = await asyncio.to_thread(task_db.get_user_profile, user_id_str)
+        freezes = profile.get("streak_freezes", 0)
+
+        if freezes <= 0:
+            embed = discord.Embed(
+                title="❄️ No Streak Freezes Available",
+                description="You don't have any streak freezes left.\nEarn more by reaching level milestones!",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        success = await asyncio.to_thread(task_db.use_streak_freeze, user_id_str)
+        if success:
+            embed = discord.Embed(
+                title="❄️ Streak Freeze Activated!",
+                description=f"Your **{profile.get('streak', 0)}-day streak** is protected for today.\n"
+                           f"Remaining freezes: **{freezes - 1}**",
+                color=discord.Color.blue()
+            )
+            embed.set_footer(text="Streak freezes replenish at level milestones (5, 10, 15...)")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ Failed to use streak freeze.", ephemeral=True)
+
+    # 23. WHO'S FOCUSING
+    @task_group.command(name="whofocusing", description="See who's currently in a focus session")
+    async def task_whofocusing(self, interaction: discord.Interaction):
+        sessions = self.active_focus_sessions
+        if not sessions:
+            await interaction.response.send_message("😴 Nobody is focusing right now. Be the first!", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="🍅 Live Focus Sessions",
+            description="These users are currently locked in and studying:",
+            color=discord.Color.orange()
+        )
+
+        now = task_db.get_ist_now()
+        lines = []
+        for uid, session in sessions.items():
+            user = self.bot.get_user(uid)
+            username = user.display_name if user else f"User {uid}"
+            start = session.get("start_time", now)
+            duration = session.get("duration", 25)
+            elapsed = int((now - start).total_seconds() / 60)
+            remaining = max(0, duration - elapsed)
+            title = session.get("title", "Unknown task")
+
+            # Progress bar
+            pct = min(1.0, elapsed / duration)
+            filled = int(pct * 8)
+            bar = "▰" * filled + "▱" * (8 - filled)
+
+            lines.append(
+                f"**{username}** — `{bar}` {int(pct*100)}%\n"
+                f"  📋 {title[:40]} • ⏱️ {remaining}min left"
+            )
+
+        embed.description = "\n\n".join(lines)
+        embed.set_footer(text=f"{len(sessions)} active session(s)")
+        await interaction.response.send_message(embed=embed)
+
+    # 24. CHALLENGE
+    @task_group.command(name="challenge", description="Challenge a friend to complete more tasks today!")
+    @app_commands.describe(user="The user to challenge")
+    async def task_challenge(self, interaction: discord.Interaction, user: discord.Member):
+        if user.bot:
+            await interaction.response.send_message("❌ You can't challenge a bot!", ephemeral=True)
+            return
+        if user.id == interaction.user.id:
+            await interaction.response.send_message("❌ You can't challenge yourself!", ephemeral=True)
+            return
+
+        # Get both users' today stats
+        challenger_id = str(interaction.user.id)
+        challenged_id = str(user.id)
+
+        challenger_tasks = await asyncio.to_thread(task_db.get_user_tasks, challenger_id)
+        challenged_tasks = await asyncio.to_thread(task_db.get_user_tasks, challenged_id)
+
+        today_str = task_db.get_ist_now().strftime("%Y-%m-%d")
+
+        challenger_today = len([t for t in challenger_tasks if t.get("status") == "completed" and (t.get("completed_at") or "")[:10] == today_str])
+        challenged_today = len([t for t in challenged_tasks if t.get("status") == "completed" and (t.get("completed_at") or "")[:10] == today_str])
+
+        embed = discord.Embed(
+            title="⚔️ Productivity Challenge!",
+            description=f"**{interaction.user.display_name}** has challenged **{user.display_name}** to a task battle!",
+            color=discord.Color.red()
+        )
+
+        # Scoreboard
+        c1_bar = "🟩" * challenger_today + "⬛" * max(0, 5 - challenger_today)
+        c2_bar = "🟦" * challenged_today + "⬛" * max(0, 5 - challenged_today)
+
+        embed.add_field(
+            name=f"🟩 {interaction.user.display_name}",
+            value=f"{c1_bar}\n**{challenger_today}** tasks today",
+            inline=True
+        )
+        embed.add_field(
+            name=f"🟦 {user.display_name}",
+            value=f"{c2_bar}\n**{challenged_today}** tasks today",
+            inline=True
+        )
+
+        if challenger_today > challenged_today:
+            embed.add_field(name="🏆 Currently Winning", value=f"**{interaction.user.display_name}** is ahead!", inline=False)
+        elif challenged_today > challenger_today:
+            embed.add_field(name="🏆 Currently Winning", value=f"**{user.display_name}** is ahead!", inline=False)
+        else:
+            embed.add_field(name="🤝 Tied!", value="It's neck and neck! Keep going!", inline=False)
+
+        embed.set_footer(text="Complete more tasks today to win! Use /task challenge again to check the score.")
+        await interaction.response.send_message(embed=embed)
+
+    # 25. EXPORT
+    @task_group.command(name="export", description="Export your tasks as a CSV file")
+    @app_commands.describe(status="Filter by status (or export all)")
+    @app_commands.choices(
+        status=[
+            app_commands.Choice(name="All Tasks", value="all"),
+            app_commands.Choice(name="Pending Only", value="pending"),
+            app_commands.Choice(name="Completed Only", value="completed")
+        ]
+    )
+    async def task_export(self, interaction: discord.Interaction, status: str = "all"):
+        await interaction.response.defer(ephemeral=True)
+        user_id_str = str(interaction.user.id)
+        tasks_list = await asyncio.to_thread(task_db.get_user_tasks, user_id_str)
+
+        if status != "all":
+            tasks_list = [t for t in tasks_list if t.get("status") == status]
+
+        if not tasks_list:
+            await interaction.followup.send("📭 No tasks to export.", ephemeral=True)
+            return
+
+        # Build CSV
+        csv_lines = ["Title,Status,Priority,Category,Due Date,Created,Completed"]
+        for t in tasks_list:
+            title = t.get("title", "").replace(",", ";")
+            csv_lines.append(
+                f"{title},{t.get('status','')},{t.get('priority','')},{t.get('category','')},{t.get('due_date','')},{t.get('created_at','')[:10]},{(t.get('completed_at') or '')[:10]}"
+            )
+
+        csv_content = "\n".join(csv_lines)
+        buf = io.BytesIO(csv_content.encode("utf-8"))
+        file = discord.File(fp=buf, filename=f"tasks_export_{task_db.get_ist_now().strftime('%Y%m%d')}.csv")
+
+        embed = discord.Embed(
+            title="📤 Tasks Exported",
+            description=f"Exported **{len(tasks_list)}** tasks ({status}) as CSV.",
+            color=discord.Color.green()
+        )
+        await interaction.followup.send(embed=embed, file=file, ephemeral=True)
+
+    # 26. BADGES VIEWER
+    @task_group.command(name="badges", description="View your earned achievement badges")
+    async def task_badges(self, interaction: discord.Interaction):
+        user_id_str = str(interaction.user.id)
+        try:
+            badges = await asyncio.to_thread(task_db.get_user_badges, user_id_str)
+        except Exception:
+            badges = []
+
+        all_badges = [
+            ("🌱 First Task", "Complete your first task"),
+            ("⚡ 10 Tasks", "Complete 10 tasks"),
+            ("🎯 25 Tasks", "Complete 25 tasks"),
+            ("💎 50 Tasks", "Complete 50 tasks"),
+            ("💯 Century Club", "Complete 100 tasks"),
+            ("🔥 3-Day Streak", "Maintain a 3-day streak"),
+            ("🔥 7-Day Streak", "Maintain a 7-day streak"),
+            ("🔥 14-Day Streak", "Maintain a 14-day streak"),
+            ("🏆 30-Day Streak", "Maintain a 30-day streak"),
+            ("🛡️ Level 5", "Reach Level 5"),
+            ("⚔️ Level 10", "Reach Level 10"),
+            ("👑 Level 20", "Reach Level 20"),
+        ]
+
+        embed = discord.Embed(
+            title=f"🏅 Badge Collection — {interaction.user.display_name}",
+            color=discord.Color.gold()
+        )
+
+        lines = []
+        earned_count = 0
+        for badge_name, desc in all_badges:
+            if badge_name in badges:
+                lines.append(f"✅ **{badge_name}** — _{desc}_")
+                earned_count += 1
+            else:
+                lines.append(f"🔒 ~~{badge_name}~~ — _{desc}_")
+
+        embed.description = "\n".join(lines)
+        embed.set_footer(text=f"Earned: {earned_count}/{len(all_badges)} badges")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     # --- Helper Logic methods ---
 
     def parse_due_date_input(self, due_str: str) -> datetime.datetime:
@@ -2053,7 +2316,13 @@ class TasksCog(commands.Cog, name="Tasks"):
                     del self.active_focus_sessions[user_id]
                     
         loop_task = asyncio.create_task(timer_coro())
-        self.active_focus_sessions[user_id] = loop_task
+        self.active_focus_sessions[user_id] = {
+            "task": loop_task,
+            "start_time": task_db.get_ist_now(),
+            "duration": duration_mins,
+            "title": title,
+            "task_id": task_id
+        }
         
         embed = discord.Embed(
             title="🍅 Focus Session Started",
