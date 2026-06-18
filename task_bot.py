@@ -75,6 +75,8 @@ async def load_extensions():
     for filename in os.listdir(cog_dir):
         if filename.endswith(".py") and filename != "__init__.py":
             cog_name = f"task_cogs.{filename[:-3]}"
+            if cog_name in bot.extensions:
+                continue
             try:
                 await bot.load_extension(cog_name)
                 logger.info(f"Loaded task bot extension: {cog_name}")
@@ -98,6 +100,11 @@ async def on_ready():
         bot.tree.copy_global_to(guild=target_guild)
         synced = await bot.tree.sync(guild=target_guild)
         logger.info(f"Successfully copied and synced {len(synced)} command(s) to target guild (ID: 1514186381348306964)")
+        
+        # Clear global commands once to prevent duplicates (since commands are guild-only)
+        bot.tree.clear_commands(guild=None)
+        await bot.tree.sync()
+        logger.info("Successfully cleared global commands to prevent duplicates.")
     except Exception as e:
         logger.error(f"Error during slash command synchronization: {e}", exc_info=True)
         
@@ -162,8 +169,46 @@ async def on_message(message: discord.Message):
 async def main():
     await start_keepalive_server()
     token = os.getenv("TASK_BOT_TOKEN")
+    if not token:
+        logger.critical("TASK_BOT_TOKEN is not set in environment variables. Exiting.")
+        return
+
+    retry_delay = 5  # Initial backoff delay in seconds
+    max_delay = 300  # Maximum backoff delay (5 minutes)
+
     async with bot:
-        await bot.start(token)
+        while True:
+            try:
+                logger.info("Attempting to connect task bot to Discord gateway...")
+                await bot.start(token)
+                # If bot.start completes cleanly, break loop
+                break
+            except (discord.LoginFailure, discord.PrivilegedIntentsRequired) as e:
+                logger.critical(f"Unrecoverable error in task bot main: {e}. Exiting.", exc_info=True)
+                raise
+            except (discord.HTTPException, aiohttp.ClientResponseError) as e:
+                status = getattr(e, "status", None)
+                # Cloudflare Error 1015 also returns HTTP 429
+                if status == 429 or "429" in str(e) or "1015" in str(e):
+                    logger.warning(
+                        f"Discord gateway rate limit hit (HTTP 429 / Error 1015). "
+                        f"Retrying in {retry_delay} seconds... Error: {e}"
+                    )
+                else:
+                    logger.warning(
+                        f"Discord connection failed with HTTP exception: {e}. "
+                        f"Retrying in {retry_delay} seconds..."
+                    )
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, max_delay)
+            except Exception as e:
+                logger.warning(
+                    f"Unexpected connection/network error in task bot main: {e}. "
+                    f"Retrying in {retry_delay} seconds...",
+                    exc_info=True
+                )
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, max_delay)
 
 # Entry point
 if __name__ == "__main__":
