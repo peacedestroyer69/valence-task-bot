@@ -89,20 +89,21 @@ async def setup_hook():
     await load_extensions()
     bot.keepalive_runner = await start_keepalive_server()
     
-    # Sync command tree to target guild once at startup to prevent duplicates and rate-limits
     try:
         guild_id = int(os.getenv("GUILD_ID", "1514186381348306964"))
         target_guild = discord.Object(id=guild_id)
-        bot.tree.copy_global_to(guild=target_guild)
-        synced = await bot.tree.sync(guild=target_guild)
-        logger.info(f"Successfully copied and synced {len(synced)} command(s) to target guild (ID: {guild_id})")
         
-        # Clear global commands once to prevent duplicates (since commands are guild-only)
+        # Sync command tree to target guild
+        synced = await bot.tree.sync(guild=target_guild)
+        logger.info(f"Successfully synced {len(synced)} command(s) to target guild (ID: {guild_id})")
+        
+        # Clear global commands once to prevent legacy duplicates (since commands are guild-only)
         bot.tree.clear_commands(guild=None)
         await bot.tree.sync()
         logger.info("Successfully cleared global commands to prevent duplicates.")
     except Exception as e:
         logger.error(f"Error during slash command synchronization in setup_hook: {e}", exc_info=True)
+
 
 @bot.event
 async def on_ready():

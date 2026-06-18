@@ -112,38 +112,71 @@ class TaskDetailView(discord.ui.View):
 
     def get_embed(self) -> discord.Embed:
         t = self.task
-        status_emoji = "✅ Completed" if t.get("status") == "completed" else "⏳ Pending"
-        priority_emoji = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}.get(t.get("priority"), "🟡")
-        private_emoji = "🔒 Private" if t.get("is_private") else "🔓 Public"
+        status = t.get("status")
+        priority = t.get("priority", "Medium")
         
-        color = 0x5865F2 if t.get("user_id") == "856485470171299891" else 0xEB459E
-
+        # 1. Dynamic Color Selection
+        if status == "completed":
+            color = 0x20BDF4  # Completed Cyan (Neon)
+        elif t.get("is_habit"):
+            color = 0x1ABC9C  # Habit Turquoise
+        else:
+            color = {"High": 0xED4245, "Medium": 0xFEE75C, "Low": 0x57F287}.get(priority, 0x5865F2)
+            
+        status_lbl = "✨ **Completed**" if status == "completed" else "⏳ **Active**"
+        priority_lbl = {"High": "🔴 **High**", "Medium": "🟡 **Medium**", "Low": "🟢 **Low**"}.get(priority, "🟡 **Medium**")
+        visibility_lbl = "🔒 **Private**" if t.get("is_private") else "🔓 **Public**"
+        category = f"📁 `{t.get('category', 'General').upper()}`"
+        
         embed = discord.Embed(
             title=f"📋 Task details: {t.get('title')}",
             description=t.get("description") or "*No description provided.*",
             color=color
         )
-        embed.add_field(name="Task ID", value=f"`{t.get('task_id')}`", inline=False)
-        embed.add_field(name="Status", value=status_emoji, inline=True)
-        embed.add_field(name="Priority", value=f"{priority_emoji} {t.get('priority')}", inline=True)
-        embed.add_field(name="Visibility", value=private_emoji, inline=True)
-        embed.add_field(name="Category", value=f"📁 {t.get('category', 'General')}", inline=True)
+        
+        # Grid details (Inline fields)
+        embed.add_field(name="📌 Status", value=status_lbl, inline=True)
+        embed.add_field(name="⚡ Priority", value=priority_lbl, inline=True)
+        embed.add_field(name="📂 Category", value=category, inline=True)
+        
+        embed.add_field(name="🔑 ID", value=f"`{t.get('task_id')[:8]}`", inline=True)
+        embed.add_field(name="🔒 Visibility", value=visibility_lbl, inline=True)
         
         if t.get("due_date"):
-            embed.add_field(name="Due Date", value=f"📅 {t.get('due_date')}", inline=True)
-        if t.get("is_habit"):
-            embed.add_field(name="Habit Recurrence", value=f"🔁 {t.get('recurrence', 'daily').capitalize()}", inline=True)
-            
-        embed.add_field(name="Pomodoros Completed", value=f"🍅 {t.get('pomodoros_completed', 0)} / {t.get('pomodoros_estimated', 1)} estimated", inline=False)
-
+            embed.add_field(name="📅 Due Date (IST)", value=f"`{t.get('due_date')}`", inline=True)
+        elif t.get("is_habit"):
+            embed.add_field(name="🔁 Recurrence", value=f"`{t.get('recurrence', 'daily').upper()}`", inline=True)
+        else:
+            embed.add_field(name="📅 Due Date", value="`No deadline`", inline=True)
+    
+        # Pomodoro Session Indicator
+        pomodoro_estimate = t.get("pomodoros_estimated", 1)
+        pomodoro_completed = t.get("pomodoros_completed", 0)
+        poms_icons = "🍅" * pomodoro_completed + "⚫" * max(0, pomodoro_estimate - pomodoro_completed)
+        embed.add_field(name="🍅 Pomodoro Sessions", value=f"{poms_icons} *({pomodoro_completed}/{pomodoro_estimate} poms)*", inline=False)
+    
+        # Subtask Checklist with progress bar
         checklist = t.get("checklist") or []
         if checklist:
-            done_count = sum(1 for x in checklist if x.get("done"))
+            done_count = sum(1 for x in checklist if x.get("done") or x.get("completed"))
+            total_count = len(checklist)
+            
+            # Draw Progress Bar
+            bar_length = 10
+            filled = int((done_count / total_count) * bar_length)
+            bar = "▰" * filled + "▱" * (bar_length - filled)
+            pct = int((done_count / total_count) * 100)
+            
             lines = []
             for i, x in enumerate(checklist, start=1):
-                icon = "✅" if x.get("done") else "⬜"
-                lines.append(f"{icon} `{i}.` {x.get('item')}")
-            embed.add_field(name=f" Checklist Progress ({done_count}/{len(checklist)})", value="\n".join(lines), inline=False)
+                is_done = x.get("done") or x.get("completed")
+                if is_done:
+                    lines.append(f"☑️ ~~`{i}.` {x.get('item')}~~")
+                else:
+                    lines.append(f"⬜ `{i}.` {x.get('item')}")
+                    
+            checklist_val = f"`{bar}` **{pct}%**\n\n" + "\n".join(lines)
+            embed.add_field(name="📝 Checklist Progress", value=checklist_val, inline=False)
             
         return embed
 
@@ -159,6 +192,7 @@ class TaskDetailView(discord.ui.View):
 
     @discord.ui.button(label="Complete", style=discord.ButtonStyle.green, row=1)
     async def btn_complete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
         success, task, stats = await asyncio.to_thread(task_db.complete_task, str(interaction.user.id), self.task_id)
         if success:
             self.task = task
@@ -168,10 +202,10 @@ class TaskDetailView(discord.ui.View):
             if stats.get("level_ups", 0) > 0:
                 xp_msg += f"\n🎉 **LEVEL UP!** You reached **Level {stats['new_level']}**!"
                 
-            await interaction.response.edit_message(embed=self.get_embed(), view=self)
+            await interaction.edit_original_response(embed=self.get_embed(), view=self)
             await interaction.followup.send(f"🎉 Task completed successfully!\n{xp_msg}", ephemeral=self.task.get("is_private"))
         else:
-            await interaction.response.send_message("❌ Failed to complete task. (Is it already completed?)", ephemeral=True)
+            await interaction.followup.send("❌ Failed to complete task. (Is it already completed?)", ephemeral=True)
 
     @discord.ui.button(label="Start Focus (25m)", style=discord.ButtonStyle.blurple, row=1)
     async def btn_focus(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -181,12 +215,12 @@ class TaskDetailView(discord.ui.View):
         else:
             await interaction.response.send_message("❌ Task cog is not loaded.", ephemeral=True)
 
-    @discord.ui.button(label="Add Subtask", style=discord.ButtonStyle.gray, row=1)
+    @discord.ui.button(label="Add Subtask", style=discord.ButtonStyle.gray, row=2)
     async def btn_add_subtask(self, interaction: discord.Interaction, button: discord.ui.Button):
         modal = AddSubtaskModal(self)
         await interaction.response.send_modal(modal)
 
-    @discord.ui.button(label="Delete", style=discord.ButtonStyle.red, row=1)
+    @discord.ui.button(label="Delete", style=discord.ButtonStyle.red, row=2)
     async def btn_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
         confirm_embed = discord.Embed(
             title="⚠️ Delete Task Confirmation",
@@ -207,11 +241,12 @@ class TaskDetailView(discord.ui.View):
                 
             @discord.ui.button(label="Yes, Delete", style=discord.ButtonStyle.danger)
             async def yes_btn(self, sub_interaction: discord.Interaction, btn: discord.ui.Button):
+                await sub_interaction.response.defer()
                 success = await asyncio.to_thread(task_db.delete_task, self.parent_view.task_id)
                 if success:
-                    await sub_interaction.response.edit_message(content="🗑️ Task deleted successfully.", embed=None, view=None)
+                    await sub_interaction.edit_original_response(content="🗑️ Task deleted successfully.", embed=None, view=None)
                 else:
-                    await sub_interaction.response.send_message("❌ Failed to delete task.", ephemeral=True)
+                    await sub_interaction.followup.send("❌ Failed to delete task.", ephemeral=True)
                     
             @discord.ui.button(label="No, Cancel", style=discord.ButtonStyle.secondary)
             async def no_btn(self, sub_interaction: discord.Interaction, btn: discord.ui.Button):
@@ -239,34 +274,44 @@ class TaskPaginationView(discord.ui.View):
         self.next_button.disabled = (self.current_page >= self.total_pages)
 
     def get_embed(self) -> discord.Embed:
-        color = 0x5865F2 if self.target_user.id == 856485470171299891 else 0xEB459E
+        # Configurable color logic
+        report_users_str = os.getenv("REPORT_USERS", "856485470171299891,1403716456025165864")
+        report_users = [int(uid.strip()) for uid in report_users_str.split(",") if uid.strip()]
+        
+        color = 0x5865F2 if self.target_user.id in report_users else 0xEB459E
+        
         embed = discord.Embed(
             title=f"📋 Task Board for {self.target_user.display_name}",
             color=color
         )
         
         if not self.tasks:
-            embed.description = "*No tasks pending.*"
+            embed.description = "*✨ You're completely caught up! No tasks left.*"
             return embed
-
+            
         start_idx = (self.current_page - 1) * self.per_page
         end_idx = start_idx + self.per_page
         page_tasks = self.tasks[start_idx:end_idx]
-
+        
         lines = []
         for i, t in enumerate(page_tasks, start=start_idx + 1):
             status_emoji = "✅" if t.get("status") == "completed" else "⏳"
             prio_emoji = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}.get(t.get("priority"), "🟡")
-            priv_lbl = "🔒 [Private] " if t.get("is_private") else ""
-            habit_lbl = "🔁 " if t.get("is_habit") else ""
-            due_lbl = f" *(Due: {t.get('due_date')})*" if t.get("due_date") else ""
             
-            lines.append(
-                f"**{i}. `{t.get('task_id')[:8]}`** | {status_emoji} {prio_emoji} {priv_lbl}{habit_lbl}**{t.get('title')}**{due_lbl}"
+            due_lbl = f" 📅 `{t.get('due_date')}`" if t.get("due_date") else " 📅 `No due date`"
+            category_lbl = f" 📁 `{t.get('category', 'General')}`"
+            habit_lbl = " 🔁 `Habit`" if t.get("is_habit") else ""
+            private_lbl = " 🔒 `Private`" if t.get("is_private") else ""
+            
+            # Format task block
+            task_block = (
+                f"**{i}. {t.get('title')}**\n"
+                f"> `{t.get('task_id')[:8]}` | {status_emoji} Status | {prio_emoji} Priority | {category_lbl}{due_lbl}{habit_lbl}{private_lbl}\n"
             )
+            lines.append(task_block)
             
         embed.description = "\n".join(lines)
-        embed.set_footer(text=f"Page {self.current_page}/{self.total_pages} | Total: {len(self.tasks)} tasks")
+        embed.set_footer(text=f"Page {self.current_page}/{self.total_pages} | 📊 Total: {len(self.tasks)} Tasks")
         return embed
 
     @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.primary)
@@ -771,6 +816,7 @@ class FocusGroup(app_commands.Group):
 
 class TasksCog(commands.Cog, name="Tasks"):
     """Cog managing all Task commands, checklists, focus, habits, and weekly graphs."""
+    __cog_app_commands_guilds__ = [int(os.getenv("GUILD_ID", "1514186381348306964"))]
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -791,6 +837,13 @@ class TasksCog(commands.Cog, name="Tasks"):
         self.habit_reset_loop.cancel()
         self.reminder_task.cancel()
         self.planner_alerts_task.cancel()
+        
+        # Cancel all active focus timer tasks
+        for session_task in list(self.active_focus_sessions.values()):
+            try:
+                session_task.cancel()
+            except Exception as e:
+                logger.error(f"[TASKS] Error cancelling focus session task: {e}")
 
     # --- Parent Task Command Group ---
     task_group = app_commands.Group(name="task", description="Valence Task Bot Commands")
@@ -1315,6 +1368,7 @@ class TasksCog(commands.Cog, name="Tasks"):
     # 9. DASHBOARD
     @task_group.command(name="dashboard", description="View your productivity level, streaks, and agenda")
     async def task_dashboard(self, interaction: discord.Interaction):
+        await interaction.response.defer()
         user_id_str = str(interaction.user.id)
         profile = await asyncio.to_thread(task_db.get_user_profile, user_id_str)
         tasks_list = await asyncio.to_thread(task_db.get_user_tasks, user_id_str)
@@ -1327,16 +1381,21 @@ class TasksCog(commands.Cog, name="Tasks"):
         
         bar_len = 10
         filled = int((xp / xp_needed) * bar_len)
-        bar = "█" * filled + "░" * (bar_len - filled)
+        bar = "▰" * filled + "▱" * (bar_len - filled)
         
-        color = 0x5865F2 if user_id_str == "856485470171299891" else 0xEB459E
+        # Configurable color logic
+        report_users_str = os.getenv("REPORT_USERS", "856485470171299891,1403716456025165864")
+        report_users = [int(uid.strip()) for uid in report_users_str.split(",") if uid.strip()]
+        
+        color = 0x5865F2 if user_id_str in report_users else 0xEB459E
+        
         embed = discord.Embed(
-            title=f"📊 Productivity Dashboard — {interaction.user.display_name}",
+            title=f"🛡️ Character Profile — {interaction.user.display_name}",
             color=color
         )
-        embed.add_field(name="Level & XP", value=f"**Level {level}**\n`[{bar}]` {xp}/{xp_needed} XP", inline=True)
-        embed.add_field(name="Daily Streak", value=f"🔥 **{profile.get('streak', 0)} days**", inline=True)
-        embed.add_field(name="Tasks Completed", value=f"✅ **{profile.get('total_completed', 0)} tasks**", inline=True)
+        embed.add_field(name="👑 Rank / Level", value=f"**Level {level}**\n`{bar}` *{xp}/{xp_needed} XP*", inline=True)
+        embed.add_field(name="🔥 Daily Streak", value=f"**{profile.get('streak', 0)} Days**\n*Keep it up!*", inline=True)
+        embed.add_field(name="🏆 Completed Tasks", value=f"**{profile.get('total_completed', 0)} Tasks**\n*Total Earned*", inline=True)
         
         if pending:
             lines = []
@@ -1348,7 +1407,7 @@ class TasksCog(commands.Cog, name="Tasks"):
         else:
             embed.add_field(name="📋 Next Up on Your Agenda", value="🎉 All caught up! No tasks pending.", inline=False)
             
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
 
     # 10. LEADERBOARD
     @task_group.command(name="leaderboard", description="View server productivity rankings")
@@ -1575,16 +1634,25 @@ class TasksCog(commands.Cog, name="Tasks"):
                     
         y_values = [counts[d] for d in date_strs]
         
-        fig = Figure(figsize=(6, 4), facecolor='#1E1F22')
+        fig = Figure(figsize=(6, 4), facecolor='#111214')
         ax = fig.subplots()
-        ax.set_facecolor('#1E1F22')
+        ax.set_facecolor('#111214')
         
-        colors = ['#5865F2' for _ in range(6)] + ['#EB459E']
+        # Plot the glowing neon line chart with circular white-bordered nodes
+        ax.plot(date_labels, y_values, color='#5865F2', marker='o', linewidth=2.5, 
+                markersize=8, markerfacecolor='#FFFFFF', markeredgecolor='#5865F2', markeredgewidth=2)
         
-        ax.bar(date_labels, y_values, color=colors, width=0.6)
+        # Semi-transparent shaded area under the curve
+        ax.fill_between(date_labels, y_values, color='#5865F2', alpha=0.15)
+        
+        # Add data labels directly above nodes to eliminate axis-scanning
+        for i, val in enumerate(y_values):
+            ax.annotate(str(val), (date_labels[i], val), textcoords="offset points", 
+                        xytext=(0, 8), ha='center', fontsize=9, color='#FFFFFF', fontweight='bold')
+            
         ax.set_title("Weekly Task Productivity Trend", fontsize=12, fontweight='bold', color='#FFFFFF', pad=15)
         ax.set_ylabel("Tasks Completed", fontsize=10, fontweight='bold', color='#B5BAC1')
-        ax.grid(axis='y', linestyle='--', alpha=0.3)
+        ax.grid(axis='y', linestyle='--', alpha=0.15, color='#4E5058')
         
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)

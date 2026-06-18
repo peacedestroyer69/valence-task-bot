@@ -437,6 +437,7 @@ def get_all_pending_tasks() -> list:
             
     # SQLite Fallback
     conn = sqlite3.connect(SQLITE_DB_PATH)
+    rows = []
     try:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM tasks WHERE status = 'pending'")
@@ -534,48 +535,48 @@ def complete_task(user_id: str, task_id: str) -> tuple:
         user_id = str(user_id)
         task_id = str(task_id)
         task = get_task(task_id)
-    if not task:
-        return False, None, {}
+        if not task:
+            return False, None, {}
+            
+        if task.get("status") == "completed":
+            return False, task, {}
+            
+        # Mark task completed
+        completed_at = get_ist_now().isoformat()
+        update_task(task_id, {"status": "completed", "completed_at": completed_at})
+        task["status"] = "completed"
+        task["completed_at"] = completed_at
         
-    if task.get("status") == "completed":
-        return False, task, {}
+        # Calculate XP reward
+        priority = task.get("priority", "Medium")
+        base_xp = 100
+        if priority == "High":
+            base_xp = 150
+        elif priority == "Low":
+            base_xp = 50
+            
+        # Checklist bonus: +10 per completed item
+        checklist = task.get("checklist", [])
+        checklist_bonus = 0
+        if checklist:
+            checklist_bonus = sum(10 for item in checklist if item.get("done") or item.get("completed"))
+            
+        total_xp = base_xp + checklist_bonus
         
-    # Mark task completed
-    completed_at = get_ist_now().isoformat()
-    update_task(task_id, {"status": "completed", "completed_at": completed_at})
-    task["status"] = "completed"
-    task["completed_at"] = completed_at
-    
-    # Calculate XP reward
-    priority = task.get("priority", "Medium")
-    base_xp = 100
-    if priority == "High":
-        base_xp = 150
-    elif priority == "Low":
-        base_xp = 50
+        # Add XP & Level Up
+        new_xp, new_level, leveled_up = add_xp(user_id, total_xp)
         
-    # Checklist bonus: +10 per completed item
-    checklist = task.get("checklist", [])
-    checklist_bonus = 0
-    if checklist:
-        checklist_bonus = sum(10 for item in checklist if item.get("done") or item.get("completed"))
+        # Update Streak
+        streak = update_streak(user_id)
         
-    total_xp = base_xp + checklist_bonus
-    
-    # Add XP & Level Up
-    new_xp, new_level, leveled_up = add_xp(user_id, total_xp)
-    
-    # Update Streak
-    streak = update_streak(user_id)
-    
-    stats = {
-        "xp_gained": total_xp,
-        "streak": streak,
-        "level_ups": 1 if leveled_up else 0,
-        "new_level": new_level
-    }
-    
-    return True, task, stats
+        stats = {
+            "xp_gained": total_xp,
+            "streak": streak,
+            "level_ups": 1 if leveled_up else 0,
+            "new_level": new_level
+        }
+        
+        return True, task, stats
 
 # --- Gamification Leaderboard ---
 
@@ -593,6 +594,7 @@ def get_leaderboard() -> list:
             
     # SQLite Fallback
     conn = sqlite3.connect(SQLITE_DB_PATH)
+    rows = []
     try:
         cursor = conn.cursor()
         cursor.execute("SELECT user_id, xp, level, streak, total_completed FROM users ORDER BY level DESC, xp DESC LIMIT 10")
@@ -628,6 +630,7 @@ def fetch_completed_habits() -> list:
             
     # SQLite Fallback
     conn = sqlite3.connect(SQLITE_DB_PATH)
+    rows = []
     try:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM tasks WHERE is_habit = 1 AND status = 'completed'")

@@ -1,3 +1,4 @@
+import os
 import logging
 import discord
 from discord.ext import commands
@@ -6,6 +7,8 @@ from discord import app_commands
 logger = logging.getLogger("TaskBot.Ping")
 
 class Ping(commands.Cog):
+    __cog_app_commands_guilds__ = [int(os.getenv("GUILD_ID", "1514186381348306964"))]
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
