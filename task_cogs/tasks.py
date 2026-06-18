@@ -543,7 +543,7 @@ class DMHomeView(discord.ui.View):
         user_id_str = str(self.user.id)
         tasks_list = await asyncio.to_thread(task_db.get_user_tasks, user_id_str)
         completed = [t for t in tasks_list if t.get("status") == "completed"]
-        file = self.cog.generate_productivity_chart(completed)
+        file = await asyncio.to_thread(self.cog.generate_productivity_chart, completed)
         
         color = 0x5865F2 if user_id_str == "856485470171299891" else 0xEB459E
         embed = discord.Embed(
@@ -598,6 +598,175 @@ class DMHomeView(discord.ui.View):
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
+# --- Subclass Groups for nested commands ---
+
+class ChecklistGroup(app_commands.Group):
+    def __init__(self, cog):
+        super().__init__(name="checklist", description="Subtask checklist management")
+        self.cog = cog
+
+    async def checklist_task_id_autocomplete(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+        return await self.cog.task_id_autocomplete(interaction, current)
+
+    @app_commands.command(name="show", description="Show a task's subtask checklist interactively")
+    @app_commands.autocomplete(task_id=checklist_task_id_autocomplete)
+    async def checklist_show(self, interaction: discord.Interaction, task_id: str):
+        task = await asyncio.to_thread(task_db.get_task, task_id)
+        if not task:
+            await interaction.response.send_message("❌ Task not found.", ephemeral=True)
+            return
+            
+        user_id_str = str(interaction.user.id)
+        is_owner = task.get("user_id") == user_id_str
+        is_shared = user_id_str in (task.get("shared_with") or [])
+        
+        if task.get("is_private") and not is_owner:
+            await interaction.response.send_message("❌ This task is private and cannot be viewed.", ephemeral=True)
+            return
+            
+        if not is_owner and not is_shared:
+            await interaction.response.send_message("❌ You do not have permission to view this task.", ephemeral=True)
+            return
+            
+        view = TaskDetailView(task, interaction.user.id)
+        await interaction.response.send_message(embed=view.get_embed(), view=view, ephemeral=task.get("is_private"))
+
+    @app_commands.command(name="add", description="Add an item to a task's subtask checklist")
+    @app_commands.autocomplete(task_id=checklist_task_id_autocomplete)
+    async def checklist_add(self, interaction: discord.Interaction, task_id: str, item: str):
+        task = await asyncio.to_thread(task_db.get_task, task_id)
+        if not task:
+            await interaction.response.send_message("❌ Task not found.", ephemeral=True)
+            return
+            
+        if task.get("user_id") != str(interaction.user.id):
+            await interaction.response.send_message("❌ You are not the owner of this task.", ephemeral=True)
+            return
+            
+        checklist = task.get("checklist") or []
+        checklist.append({"item": item, "done": False})
+        
+        success = await asyncio.to_thread(task_db.update_task, task_id, {"checklist": checklist})
+        if success:
+            embed = discord.Embed(
+                title="➕ Subtask Added",
+                description=f"Added `\"{item}\"` to **{task.get('title')}** checklist.",
+                color=discord.Color.green()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=task.get("is_private"))
+        else:
+            await interaction.response.send_message("❌ Failed to update task checklist.", ephemeral=True)
+
+    @app_commands.command(name="toggle", description="Toggle a subtask checklist item status by number")
+    @app_commands.autocomplete(task_id=checklist_task_id_autocomplete)
+    async def checklist_toggle(self, interaction: discord.Interaction, task_id: str, number: int):
+        task = await asyncio.to_thread(task_db.get_task, task_id)
+        if not task:
+            await interaction.response.send_message("❌ Task not found.", ephemeral=True)
+            return
+            
+        user_id_str = str(interaction.user.id)
+        is_owner = task.get("user_id") == user_id_str
+        is_shared = user_id_str in (task.get("shared_with") or [])
+        if not is_owner and not is_shared:
+            await interaction.response.send_message("❌ You do not have permission to modify this task.", ephemeral=True)
+            return
+            
+        checklist = task.get("checklist") or []
+        idx = number - 1
+        if idx < 0 or idx >= len(checklist):
+            await interaction.response.send_message(f"❌ Invalid subtask number. Valid range is 1 to {len(checklist)}.", ephemeral=True)
+            return
+            
+        checklist[idx]["done"] = not checklist[idx]["done"]
+        success = await asyncio.to_thread(task_db.update_task, task_id, {"checklist": checklist})
+        if success:
+            status = "Completed" if checklist[idx]["done"] else "Pending"
+            embed = discord.Embed(
+                title="🔄 Subtask Toggled",
+                description=f"Set subtask `{number}. \"{checklist[idx]['item']}\"` of **{task.get('title')}** to **{status}**.",
+                color=discord.Color.blue()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=task.get("is_private"))
+        else:
+            await interaction.response.send_message("❌ Failed to update task checklist.", ephemeral=True)
+
+    @app_commands.command(name="remove", description="Remove a subtask checklist item by number")
+    @app_commands.autocomplete(task_id=checklist_task_id_autocomplete)
+    async def checklist_remove(self, interaction: discord.Interaction, task_id: str, number: int):
+        task = await asyncio.to_thread(task_db.get_task, task_id)
+        if not task:
+            await interaction.response.send_message("❌ Task not found.", ephemeral=True)
+            return
+            
+        if task.get("user_id") != str(interaction.user.id):
+            await interaction.response.send_message("❌ You are not the owner of this task.", ephemeral=True)
+            return
+            
+        checklist = task.get("checklist") or []
+        idx = number - 1
+        if idx < 0 or idx >= len(checklist):
+            await interaction.response.send_message(f"❌ Invalid subtask number. Valid range is 1 to {len(checklist)}.", ephemeral=True)
+            return
+            
+        removed_item = checklist.pop(idx)
+        success = await asyncio.to_thread(task_db.update_task, task_id, {"checklist": checklist})
+        if success:
+            embed = discord.Embed(
+                title="🗑️ Subtask Removed",
+                description=f"Removed subtask `{number}. \"{removed_item['item']}\"` from **{task.get('title')}**.",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=task.get("is_private"))
+        else:
+            await interaction.response.send_message("❌ Failed to update task checklist.", ephemeral=True)
+
+
+class FocusGroup(app_commands.Group):
+    def __init__(self, cog):
+        super().__init__(name="focus", description="Focus timer control commands")
+        self.cog = cog
+
+    async def focus_task_id_autocomplete(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+        return await self.cog.task_id_autocomplete(interaction, current)
+
+    @app_commands.command(name="start", description="Start a focus session (Pomodoro) tied to a task")
+    @app_commands.autocomplete(task_id=focus_task_id_autocomplete)
+    async def focus_start(self, interaction: discord.Interaction, task_id: str, duration: int = 25):
+        if duration <= 0:
+            await interaction.response.send_message("❌ Duration must be a positive integer.", ephemeral=True)
+            return
+
+        task = await asyncio.to_thread(task_db.get_task, task_id)
+        if not task:
+            await interaction.response.send_message("❌ Task not found.", ephemeral=True)
+            return
+            
+        user_id_str = str(interaction.user.id)
+        is_owner = task.get("user_id") == user_id_str
+        is_shared = user_id_str in (task.get("shared_with") or [])
+        
+        if task.get("is_private") and not is_owner:
+            await interaction.response.send_message("❌ This task is private.", ephemeral=True)
+            return
+            
+        if not is_owner and not is_shared:
+            await interaction.response.send_message("❌ You do not have permission to focus on this task.", ephemeral=True)
+            return
+            
+        await self.cog.start_focus_timer(interaction, task, duration)
+
+    @app_commands.command(name="cancel", description="Cancel your active focus session")
+    async def focus_cancel(self, interaction: discord.Interaction):
+        user_id = interaction.user.id
+        if user_id not in self.cog.active_focus_sessions:
+            await interaction.response.send_message("❌ You do not have an active focus session.", ephemeral=True)
+            return
+        loop_task = self.cog.active_focus_sessions.pop(user_id)
+        loop_task.cancel()
+        await interaction.response.send_message("🛑 Focus session cancelled successfully. No XP awarded.", ephemeral=True)
+
+
 # --- Tasks Cog Class ---
 
 class TasksCog(commands.Cog, name="Tasks"):
@@ -606,9 +775,17 @@ class TasksCog(commands.Cog, name="Tasks"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.active_focus_sessions = {}  # user_id -> TaskFocusTimer object
+        self.last_habit_reset_date = None
         self.habit_reset_loop.start()
         self.reminder_task.start()
         self.planner_alerts_task.start()
+
+        # Reload-safe dynamic nesting
+        existing_names = [cmd.name for cmd in self.task_group.commands]
+        if "checklist" not in existing_names:
+            self.task_group.add_command(ChecklistGroup(self))
+        if "focus" not in existing_names:
+            self.task_group.add_command(FocusGroup(self))
 
     def cog_unload(self):
         self.habit_reset_loop.cancel()
@@ -618,14 +795,49 @@ class TasksCog(commands.Cog, name="Tasks"):
     # --- Parent Task Command Group ---
     task_group = app_commands.Group(name="task", description="Valence Task Bot Commands")
 
+    # Autocomplete handler
+    async def task_id_autocomplete(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+        user_id_str = str(interaction.user.id)
+        # Safely fetch all pending and completed tasks for the user (owned or shared)
+        tasks_list = await asyncio.to_thread(task_db.get_user_tasks, user_id_str)
+        
+        current = current.lower()
+        choices = []
+        for t in tasks_list:
+            title = t.get("title", "")
+            task_id = t.get("task_id", "")
+            
+            if not current or current in title.lower() or current in task_id.lower():
+                status_char = "✅" if t.get("status") == "completed" else "⏳"
+                prio_char = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}.get(t.get("priority"), "🟡")
+                label = f"{status_char}{prio_char} {title}"
+                if len(label) > 100:
+                    label = label[:97] + "..."
+                choices.append(app_commands.Choice(name=label, value=task_id))
+                
+        return choices[:25]
+
     # --- Background Loops ---
 
     @tasks.loop(minutes=5)
     async def habit_reset_loop(self):
         """Dynamic completed-habit reset checks in IST."""
         now = task_db.get_ist_now()
-        if now.hour == 0 and now.minute < 6:
-            logger.info("[HABITS] Checking for habits to reset...")
+        today_str = now.strftime("%Y-%m-%d")
+        
+        # Persistent habit reset check
+        try:
+            last_reset = await asyncio.to_thread(task_db.get_last_habit_reset_date)
+        except Exception as e:
+            logger.error(f"[HABITS] Error reading last reset date: {e}")
+            return
+            
+        if last_reset == today_str:
+            self.last_habit_reset_date = today_str
+            return
+            
+        logger.info("[HABITS] Checking for habits to reset...")
+        try:
             completed_habits = await asyncio.to_thread(task_db.fetch_completed_habits)
             for h in completed_habits:
                 rec = h.get("recurrence", "daily")
@@ -638,6 +850,12 @@ class TasksCog(commands.Cog, name="Tasks"):
                 if should_reset:
                     await asyncio.to_thread(task_db.reset_habit, h["task_id"])
                     logger.info(f"[HABITS] Reset habit task '{h.get('title')}' (ID: {h['task_id']})")
+                    
+            await asyncio.to_thread(task_db.set_last_habit_reset_date, today_str)
+            self.last_habit_reset_date = today_str
+            logger.info(f"[HABITS] Successfully completed habit resets for {today_str}")
+        except Exception as e:
+            logger.error(f"[HABITS] Error during habit resets: {e}")
 
     @tasks.loop(minutes=1)
     async def reminder_task(self):
@@ -805,7 +1023,7 @@ class TasksCog(commands.Cog, name="Tasks"):
                     tasks_list = await asyncio.to_thread(task_db.get_user_tasks, uid_str)
                     completed = [t for t in tasks_list if t.get("status") == "completed"]
                     
-                    file = self.generate_productivity_chart(completed)
+                    file = await asyncio.to_thread(self.generate_productivity_chart, completed)
                     
                     color = 0x5865F2 if uid_str == "856485470171299891" else 0xEB459E
                     embed = discord.Embed(
@@ -890,6 +1108,7 @@ class TasksCog(commands.Cog, name="Tasks"):
     # 2. VIEW TASK DETAILS
     @task_group.command(name="view", description="View and manage task details interactively")
     @app_commands.describe(task_id="The UUID of the task to view")
+    @app_commands.autocomplete(task_id=task_id_autocomplete)
     async def task_view(self, interaction: discord.Interaction, task_id: str):
         task = await asyncio.to_thread(task_db.get_task, task_id)
         if not task:
@@ -929,6 +1148,7 @@ class TasksCog(commands.Cog, name="Tasks"):
             app_commands.Choice(name="High", value="High")
         ]
     )
+    @app_commands.autocomplete(task_id=task_id_autocomplete)
     async def task_edit(self, interaction: discord.Interaction, task_id: str, title: str = None, 
                         description: str = None, due_date: str = None, priority: str = None, 
                         category: str = None, private: bool = None):
@@ -975,6 +1195,7 @@ class TasksCog(commands.Cog, name="Tasks"):
     # 4. DELETE TASK
     @task_group.command(name="delete", description="Delete a task")
     @app_commands.describe(task_id="The UUID of the task")
+    @app_commands.autocomplete(task_id=task_id_autocomplete)
     async def task_delete(self, interaction: discord.Interaction, task_id: str):
         task = await asyncio.to_thread(task_db.get_task, task_id)
         if not task:
@@ -991,6 +1212,7 @@ class TasksCog(commands.Cog, name="Tasks"):
     # 5. COMPLETE TASK
     @task_group.command(name="complete", description="Complete a task and earn XP")
     @app_commands.describe(task_id="The UUID of the task")
+    @app_commands.autocomplete(task_id=task_id_autocomplete)
     async def task_complete(self, interaction: discord.Interaction, task_id: str):
         task = await asyncio.to_thread(task_db.get_task, task_id)
         if not task:
@@ -1062,6 +1284,7 @@ class TasksCog(commands.Cog, name="Tasks"):
     # 7. SHARE TASK
     @task_group.command(name="share", description="Share a public task with another server user")
     @app_commands.describe(task_id="The UUID of the task", user="The user to collaborate with")
+    @app_commands.autocomplete(task_id=task_id_autocomplete)
     async def task_share(self, interaction: discord.Interaction, task_id: str, user: discord.Member):
         task = await asyncio.to_thread(task_db.get_task, task_id)
         if not task:
@@ -1087,30 +1310,7 @@ class TasksCog(commands.Cog, name="Tasks"):
         
         await interaction.response.send_message(f"🤝 Task **{task['title']}** is now shared with {user.mention}!")
 
-    # 8. FOCUS TIMERS GROUP
-    focus_group = app_commands.Group(name="focus", description="Focus timer control commands")
-
-    @focus_group.command(name="start", description="Start a focus session (Pomodoro) tied to a task")
-    @app_commands.describe(task_id="The UUID of the task to focus on", duration="Duration in minutes (default 25)")
-    async def focus_start(self, interaction: discord.Interaction, task_id: str, duration: int = 25):
-        task = await asyncio.to_thread(task_db.get_task, task_id)
-        if not task:
-            await interaction.response.send_message("❌ Task not found.", ephemeral=True)
-            return
-            
-        await self.start_focus_timer(interaction, task, duration)
-
-    @focus_group.command(name="cancel", description="Cancel your active focus session")
-    async def focus_cancel(self, interaction: discord.Interaction):
-        user_id = interaction.user.id
-        if user_id not in self.active_focus_sessions:
-            await interaction.response.send_message("❌ You do not have an active focus session.", ephemeral=True)
-            return
-            
-        loop_task = self.active_focus_sessions.pop(user_id)
-        loop_task.cancel()
-        
-        await interaction.response.send_message("🛑 Focus session cancelled successfully. No XP awarded.", ephemeral=True)
+    # Old Focus commands removed (now nested under /task focus start/cancel)
 
     # 9. DASHBOARD
     @task_group.command(name="dashboard", description="View your productivity level, streaks, and agenda")
@@ -1186,7 +1386,7 @@ class TasksCog(commands.Cog, name="Tasks"):
         tasks_list = await asyncio.to_thread(task_db.get_user_tasks, user_id_str)
         completed = [t for t in tasks_list if t.get("status") == "completed"]
         
-        file = self.generate_productivity_chart(completed)
+        file = await asyncio.to_thread(self.generate_productivity_chart, completed)
         
         color = 0x5865F2 if user_id_str == "856485470171299891" else 0xEB459E
         embed = discord.Embed(
@@ -1232,6 +1432,7 @@ class TasksCog(commands.Cog, name="Tasks"):
         task_id="The UUID of the task",
         time="Time to remind (e.g. '10m', '2h', 'tomorrow', '15:30', or 'YYYY-MM-DD HH:MM')"
     )
+    @app_commands.autocomplete(task_id=task_id_autocomplete)
     async def task_remind(self, interaction: discord.Interaction, task_id: str, time: str):
         task = await asyncio.to_thread(task_db.get_task, task_id)
         if not task:
@@ -1408,6 +1609,10 @@ class TasksCog(commands.Cog, name="Tasks"):
             
         user_id_str = str(message.author.id)
         if user_id_str not in ["856485470171299891", "1403716456025165864"]:
+            return
+            
+        content = message.content.strip().lower()
+        if content not in ["home", "panel", "menu", "help", "tasks", "start", "!home", "!panel"]:
             return
             
         # Reply with the interactive DM Home Panel
