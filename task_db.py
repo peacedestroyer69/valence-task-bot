@@ -16,6 +16,10 @@ db = None
 use_sqlite = True
 db_lock = threading.RLock()
 
+# --- Column Whitelists (SQL injection prevention) ---
+ALLOWED_USER_FIELDS = {"xp", "level", "streak", "last_completed_date", "total_completed", "best_streak", "streak_freezes", "badges"}
+ALLOWED_TASK_FIELDS = {"title", "description", "due_date", "priority", "category", "is_private", "status", "completed_at", "shared_with", "checklist", "pomodoros_estimated", "pomodoros_completed", "recurrence", "is_habit", "due_warning_sent", "remind_at", "notes"}
+
 # --- Firebase Initialization ---
 try:
     cred_json = os.getenv("FIREBASE_CREDENTIALS")
@@ -59,7 +63,10 @@ def init_local_db():
                 level INTEGER DEFAULT 1,
                 streak INTEGER DEFAULT 0,
                 last_completed_date TEXT,
-                total_completed INTEGER DEFAULT 0
+                total_completed INTEGER DEFAULT 0,
+                best_streak INTEGER DEFAULT 0,
+                streak_freezes INTEGER DEFAULT 1,
+                badges TEXT DEFAULT '[]'
             )
         """)
         # Tasks table
@@ -83,18 +90,24 @@ def init_local_db():
                 recurrence TEXT DEFAULT 'none',
                 is_habit INTEGER DEFAULT 0,
                 due_warning_sent INTEGER DEFAULT 0,
-                remind_at TEXT
+                remind_at TEXT,
+                notes TEXT DEFAULT '[]'
             )
         """)
         # Upgrade existing SQLite DB if columns are missing
-        try:
-            cursor.execute("ALTER TABLE tasks ADD COLUMN due_warning_sent INTEGER DEFAULT 0")
-        except sqlite3.OperationalError:
-            pass
-        try:
-            cursor.execute("ALTER TABLE tasks ADD COLUMN remind_at TEXT")
-        except sqlite3.OperationalError:
-            pass
+        _migrate_columns = [
+            ("tasks", "due_warning_sent", "INTEGER DEFAULT 0"),
+            ("tasks", "remind_at", "TEXT"),
+            ("tasks", "notes", "TEXT DEFAULT '[]'"),
+            ("users", "best_streak", "INTEGER DEFAULT 0"),
+            ("users", "streak_freezes", "INTEGER DEFAULT 1"),
+            ("users", "badges", "TEXT DEFAULT '[]'"),
+        ]
+        for table, col, col_type in _migrate_columns:
+            try:
+                cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
+            except sqlite3.OperationalError:
+                pass
         conn.commit()
     finally:
         conn.close()
@@ -113,6 +126,41 @@ def get_ist_date_str() -> str:
     """Returns today's date in IST as YYYY-MM-DD."""
     return get_ist_now().strftime("%Y-%m-%d")
 
+# --- Row-to-Dict Helpers ---
+
+def _row_to_task_dict(row) -> dict:
+    """Converts a SQLite row tuple to a task dictionary. Eliminates copy-paste."""
+    def _safe_json_loads(val):
+        if val is None:
+            return []
+        try:
+            return json.loads(val)
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    return {
+        "task_id": row[0],
+        "user_id": row[1],
+        "title": row[2],
+        "description": row[3],
+        "due_date": row[4],
+        "priority": row[5],
+        "category": row[6],
+        "is_private": bool(row[7]),
+        "status": row[8],
+        "created_at": row[9],
+        "completed_at": row[10],
+        "shared_with": _safe_json_loads(row[11]),
+        "checklist": _safe_json_loads(row[12]),
+        "pomodoros_estimated": row[13],
+        "pomodoros_completed": row[14],
+        "recurrence": row[15],
+        "is_habit": bool(row[16]),
+        "due_warning_sent": bool(row[17]) if len(row) > 17 else False,
+        "remind_at": row[18] if len(row) > 18 else None,
+        "notes": _safe_json_loads(row[19]) if len(row) > 19 else [],
+    }
+
 # --- User Profile Operations ---
 
 def get_user_profile(user_id: str) -> dict:
@@ -124,7 +172,10 @@ def get_user_profile(user_id: str) -> dict:
         "level": 1,
         "streak": 0,
         "last_completed_date": None,
-        "total_completed": 0
+        "total_completed": 0,
+        "best_streak": 0,
+        "streak_freezes": 1,
+        "badges": "[]"
     }
     
     if not use_sqlite and db:
@@ -146,7 +197,7 @@ def get_user_profile(user_id: str) -> dict:
     conn = sqlite3.connect(SQLITE_DB_PATH)
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT xp, level, streak, last_completed_date, total_completed FROM users WHERE user_id = ?", (user_id,))
+        cursor.execute("SELECT xp, level, streak, last_completed_date, total_completed, best_streak, streak_freezes, badges FROM users WHERE user_id = ?", (user_id,))
         row = cursor.fetchone()
         if row:
             return {
@@ -155,12 +206,15 @@ def get_user_profile(user_id: str) -> dict:
                 "level": row[1],
                 "streak": row[2],
                 "last_completed_date": row[3],
-                "total_completed": row[4]
+                "total_completed": row[4],
+                "best_streak": row[5] if row[5] is not None else 0,
+                "streak_freezes": row[6] if row[6] is not None else 1,
+                "badges": row[7] if row[7] is not None else "[]"
             }
         else:
             cursor.execute(
-                "INSERT INTO users (user_id, xp, level, streak, last_completed_date, total_completed) VALUES (?, ?, ?, ?, ?, ?)",
-                (user_id, 0, 1, 0, None, 0)
+                "INSERT INTO users (user_id, xp, level, streak, last_completed_date, total_completed, best_streak, streak_freezes, badges) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (user_id, 0, 1, 0, None, 0, 0, 1, "[]")
             )
             conn.commit()
             return default_profile
@@ -170,30 +224,40 @@ def get_user_profile(user_id: str) -> dict:
 def update_user_profile(user_id: str, updates: dict) -> bool:
     """Updates fields on a user's profile."""
     user_id = str(user_id)
-    if not use_sqlite and db:
+
+    # Validate keys against whitelist
+    invalid_keys = set(updates.keys()) - ALLOWED_USER_FIELDS
+    if invalid_keys:
+        logger.warning(f"update_user_profile: rejected invalid fields: {invalid_keys}")
+        updates = {k: v for k, v in updates.items() if k in ALLOWED_USER_FIELDS}
+    if not updates:
+        return False
+
+    with db_lock:
+        if not use_sqlite and db:
+            try:
+                db.collection("task_bot_users").document(user_id).update(updates)
+                return True
+            except Exception as e:
+                logger.error(f"Firestore update_user_profile error: {e}")
+                raise e
+                
+        # SQLite Fallback
+        conn = sqlite3.connect(SQLITE_DB_PATH)
         try:
-            db.collection("task_bot_users").document(user_id).update(updates)
+            cursor = conn.cursor()
+            fields = []
+            params = []
+            for k, v in updates.items():
+                fields.append(f"{k} = ?")
+                params.append(v)
+            params.append(user_id)
+            query = f"UPDATE users SET {', '.join(fields)} WHERE user_id = ?"
+            cursor.execute(query, params)
+            conn.commit()
             return True
-        except Exception as e:
-            logger.error(f"Firestore update_user_profile error: {e}")
-            raise e
-            
-    # SQLite Fallback
-    conn = sqlite3.connect(SQLITE_DB_PATH)
-    try:
-        cursor = conn.cursor()
-        fields = []
-        params = []
-        for k, v in updates.items():
-            fields.append(f"{k} = ?")
-            params.append(v)
-        params.append(user_id)
-        query = f"UPDATE users SET {', '.join(fields)} WHERE user_id = ?"
-        cursor.execute(query, params)
-        conn.commit()
-        return True
-    finally:
-        conn.close()
+        finally:
+            conn.close()
 
 def add_xp(user_id: str, amount: int) -> tuple:
     """Awards XP to a user and handles leveling up. Returns (new_xp, new_level, leveled_up: bool)."""
@@ -222,6 +286,7 @@ def update_streak(user_id: str) -> int:
         today_str = get_ist_date_str()
         last_completed = profile.get("last_completed_date")
         current_streak = profile.get("streak", 0)
+        best_streak = profile.get("best_streak", 0)
         
         if last_completed == today_str:
             # Already completed a task today, streak is maintained
@@ -234,12 +299,32 @@ def update_streak(user_id: str) -> int:
                 current_streak += 1
             else:
                 current_streak = 1
-            
-        update_user_profile(user_id, {
-            "streak": current_streak,
-            "last_completed_date": today_str,
-            "total_completed": profile.get("total_completed", 0) + 1
-        })
+        
+        # Update best_streak if current exceeds it
+        if current_streak > best_streak:
+            best_streak = current_streak
+
+        # Use atomic SQL for total_completed instead of read-then-write
+        if use_sqlite:
+            conn = sqlite3.connect(SQLITE_DB_PATH)
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE users SET streak = ?, last_completed_date = ?, total_completed = total_completed + 1, best_streak = ? WHERE user_id = ?",
+                    (current_streak, today_str, best_streak, str(user_id))
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        else:
+            # For Firebase, we still do the field-based update (no atomic increment available via simple dict)
+            update_user_profile(user_id, {
+                "streak": current_streak,
+                "last_completed_date": today_str,
+                "total_completed": profile.get("total_completed", 0) + 1,
+                "best_streak": best_streak
+            })
+
         return current_streak
 
 # --- Task Operations ---
@@ -271,37 +356,39 @@ def add_task(user_id: str, title: str, description: str = "", due_date: str = No
         "recurrence": recurrence,
         "is_habit": is_habit,
         "due_warning_sent": False,
-        "remind_at": None
+        "remind_at": None,
+        "notes": []
     }
     
-    if not use_sqlite and db:
+    with db_lock:
+        if not use_sqlite and db:
+            try:
+                db.collection("task_bot_tasks").document(task_id).set(task_data)
+                return task_id
+            except Exception as e:
+                logger.error(f"Firestore add_task error: {e}")
+                raise e
+                
+        # SQLite Fallback
+        conn = sqlite3.connect(SQLITE_DB_PATH)
         try:
-            db.collection("task_bot_tasks").document(task_id).set(task_data)
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO tasks (
+                    task_id, user_id, title, description, due_date, priority, category, 
+                    is_private, status, created_at, completed_at, shared_with, checklist, 
+                    pomodoros_estimated, pomodoros_completed, recurrence, is_habit, due_warning_sent, remind_at, notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                task_id, user_id, title, description, due_date, priority, category,
+                1 if is_private else 0, "pending", task_data["created_at"], None,
+                json.dumps([]), json.dumps([]), pomodoros_estimated, 0, recurrence, 1 if is_habit else 0,
+                0, None, json.dumps([])
+            ))
+            conn.commit()
             return task_id
-        except Exception as e:
-            logger.error(f"Firestore add_task error: {e}")
-            raise e
-            
-    # SQLite Fallback
-    conn = sqlite3.connect(SQLITE_DB_PATH)
-    try:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO tasks (
-                task_id, user_id, title, description, due_date, priority, category, 
-                is_private, status, created_at, completed_at, shared_with, checklist, 
-                pomodoros_estimated, pomodoros_completed, recurrence, is_habit, due_warning_sent, remind_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            task_id, user_id, title, description, due_date, priority, category,
-            1 if is_private else 0, "pending", task_data["created_at"], None,
-            json.dumps([]), json.dumps([]), pomodoros_estimated, 0, recurrence, 1 if is_habit else 0,
-            0, None
-        ))
-        conn.commit()
-        return task_id
-    finally:
-        conn.close()
+        finally:
+            conn.close()
 
 def get_task(task_id: str) -> dict:
     """Retrieves a single task by ID."""
@@ -323,27 +410,7 @@ def get_task(task_id: str) -> dict:
         cursor.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,))
         row = cursor.fetchone()
         if row:
-            return {
-                "task_id": row[0],
-                "user_id": row[1],
-                "title": row[2],
-                "description": row[3],
-                "due_date": row[4],
-                "priority": row[5],
-                "category": row[6],
-                "is_private": bool(row[7]),
-                "status": row[8],
-                "created_at": row[9],
-                "completed_at": row[10],
-                "shared_with": json.loads(row[11]),
-                "checklist": json.loads(row[12]),
-                "pomodoros_estimated": row[13],
-                "pomodoros_completed": row[14],
-                "recurrence": row[15],
-                "is_habit": bool(row[16]),
-                "due_warning_sent": bool(row[17]) if len(row) > 17 else False,
-                "remind_at": row[18] if len(row) > 18 else None
-            }
+            return _row_to_task_dict(row)
         return None
     finally:
         conn.close()
@@ -400,30 +467,7 @@ def get_user_tasks(user_id: str, status: str = None, category: str = None, prior
     finally:
         conn.close()
     
-    tasks = []
-    for row in rows:
-        tasks.append({
-            "task_id": row[0],
-            "user_id": row[1],
-            "title": row[2],
-            "description": row[3],
-            "due_date": row[4],
-            "priority": row[5],
-            "category": row[6],
-            "is_private": bool(row[7]),
-            "status": row[8],
-            "created_at": row[9],
-            "completed_at": row[10],
-            "shared_with": json.loads(row[11]),
-            "checklist": json.loads(row[12]),
-            "pomodoros_estimated": row[13],
-            "pomodoros_completed": row[14],
-            "recurrence": row[15],
-            "is_habit": bool(row[16]),
-            "due_warning_sent": bool(row[17]) if len(row) > 17 else False,
-            "remind_at": row[18] if len(row) > 18 else None
-        })
-    return tasks
+    return [_row_to_task_dict(row) for row in rows]
 
 def get_all_pending_tasks() -> list:
     """Retrieves all pending tasks across all users (for reminders)."""
@@ -445,89 +489,77 @@ def get_all_pending_tasks() -> list:
     finally:
         conn.close()
     
-    tasks = []
-    for row in rows:
-        tasks.append({
-            "task_id": row[0],
-            "user_id": row[1],
-            "title": row[2],
-            "description": row[3],
-            "due_date": row[4],
-            "priority": row[5],
-            "category": row[6],
-            "is_private": bool(row[7]),
-            "status": row[8],
-            "created_at": row[9],
-            "completed_at": row[10],
-            "shared_with": json.loads(row[11]),
-            "checklist": json.loads(row[12]),
-            "pomodoros_estimated": row[13],
-            "pomodoros_completed": row[14],
-            "recurrence": row[15],
-            "is_habit": bool(row[16]),
-            "due_warning_sent": bool(row[17]) if len(row) > 17 else False,
-            "remind_at": row[18] if len(row) > 18 else None
-        })
-    return tasks
+    return [_row_to_task_dict(row) for row in rows]
 
 def update_task(task_id: str, updates: dict) -> bool:
     """Updates fields on an existing task."""
     task_id = str(task_id)
-    if not use_sqlite and db:
-        try:
-            db.collection("task_bot_tasks").document(task_id).update(updates)
-            return True
-        except Exception as e:
-            logger.error(f"Firestore update_task error: {e}")
-            raise e
-            
-    # SQLite Fallback
-    task = get_task(task_id)
-    if not task:
+
+    # Validate keys against whitelist
+    invalid_keys = set(updates.keys()) - ALLOWED_TASK_FIELDS
+    if invalid_keys:
+        logger.warning(f"update_task: rejected invalid fields: {invalid_keys}")
+        updates = {k: v for k, v in updates.items() if k in ALLOWED_TASK_FIELDS}
+    if not updates:
         return False
-    
-    conn = sqlite3.connect(SQLITE_DB_PATH)
-    try:
-        cursor = conn.cursor()
-        fields = []
-        params = []
-        for k, v in updates.items():
-            fields.append(f"{k} = ?")
-            if k in ["shared_with", "checklist"]:
-                params.append(json.dumps(v))
-            elif k in ["is_private", "is_habit", "due_warning_sent"]:
-                params.append(1 if v else 0)
-            else:
-                params.append(v)
-        params.append(task_id)
-        query = f"UPDATE tasks SET {', '.join(fields)} WHERE task_id = ?"
-        cursor.execute(query, params)
-        conn.commit()
-        return True
-    finally:
-        conn.close()
+
+    with db_lock:
+        if not use_sqlite and db:
+            try:
+                db.collection("task_bot_tasks").document(task_id).update(updates)
+                return True
+            except Exception as e:
+                logger.error(f"Firestore update_task error: {e}")
+                raise e
+                
+        # SQLite Fallback
+        task = get_task(task_id)
+        if not task:
+            return False
+        
+        conn = sqlite3.connect(SQLITE_DB_PATH)
+        try:
+            cursor = conn.cursor()
+            fields = []
+            params = []
+            for k, v in updates.items():
+                fields.append(f"{k} = ?")
+                if k in ["shared_with", "checklist", "notes"]:
+                    params.append(json.dumps(v))
+                elif k in ["is_private", "is_habit", "due_warning_sent"]:
+                    params.append(1 if v else 0)
+                else:
+                    params.append(v)
+            params.append(task_id)
+            query = f"UPDATE tasks SET {', '.join(fields)} WHERE task_id = ?"
+            cursor.execute(query, params)
+            conn.commit()
+            return True
+        finally:
+            conn.close()
 
 def delete_task(task_id: str) -> bool:
     """Deletes a task by ID."""
     task_id = str(task_id)
-    if not use_sqlite and db:
+    with db_lock:
+        if not use_sqlite and db:
+            try:
+                db.collection("task_bot_tasks").document(task_id).delete()
+                return True
+            except Exception as e:
+                logger.error(f"Firestore delete_task error: {e}")
+                raise e
+                
+        # SQLite Fallback
+        conn = sqlite3.connect(SQLITE_DB_PATH)
         try:
-            db.collection("task_bot_tasks").document(task_id).delete()
-            return True
-        except Exception as e:
-            logger.error(f"Firestore delete_task error: {e}")
-            raise e
-            
-    # SQLite Fallback
-    conn = sqlite3.connect(SQLITE_DB_PATH)
-    try:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
-        rows_affected = cursor.rowcount
-        conn.commit()
-        return rows_affected > 0
-    finally:
-        conn.close()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
+            rows_affected = cursor.rowcount
+            conn.commit()
+            return rows_affected > 0
+        finally:
+            conn.close()
 
 def complete_task(user_id: str, task_id: str) -> tuple:
     """Marks a task completed, awards XP, and updates streaks. Returns (success, task, stats)."""
@@ -638,30 +670,7 @@ def fetch_completed_habits() -> list:
     finally:
         conn.close()
     
-    habits = []
-    for row in rows:
-        habits.append({
-            "task_id": row[0],
-            "user_id": row[1],
-            "title": row[2],
-            "description": row[3],
-            "due_date": row[4],
-            "priority": row[5],
-            "category": row[6],
-            "is_private": bool(row[7]),
-            "status": row[8],
-            "created_at": row[9],
-            "completed_at": row[10],
-            "shared_with": json.loads(row[11]),
-            "checklist": json.loads(row[12]),
-            "pomodoros_estimated": row[13],
-            "pomodoros_completed": row[14],
-            "recurrence": row[15],
-            "is_habit": bool(row[16]),
-            "due_warning_sent": bool(row[17]) if len(row) > 17 else False,
-            "remind_at": row[18] if len(row) > 18 else None
-        })
-    return habits
+    return [_row_to_task_dict(row) for row in rows]
 
 def reset_habit(task_id: str):
     """Resets a completed habit status back to pending."""
@@ -707,3 +716,207 @@ def set_last_habit_reset_date(date_str: str):
         conn.commit()
     finally:
         conn.close()
+
+# --- New DB Functions ---
+
+def reopen_task(task_id: str) -> bool:
+    """Sets a completed task back to pending, clears completed_at."""
+    task_id = str(task_id)
+    task = get_task(task_id)
+    if not task:
+        return False
+    if task.get("status") != "completed":
+        return False
+    return update_task(task_id, {"status": "pending", "completed_at": None})
+
+def get_overdue_tasks(user_id: str) -> list:
+    """Gets all pending tasks where due_date < now (IST)."""
+    user_id = str(user_id)
+    now_str = get_ist_now().isoformat()
+
+    if not use_sqlite and db:
+        try:
+            tasks_ref = db.collection("task_bot_tasks")
+            docs = tasks_ref.where("user_id", "==", user_id) \
+                            .where("status", "==", "pending") \
+                            .stream()
+            overdue = []
+            for doc in docs:
+                t = doc.to_dict()
+                due = t.get("due_date")
+                if due and due < now_str:
+                    overdue.append(t)
+            return overdue
+        except Exception as e:
+            logger.error(f"Firestore get_overdue_tasks error: {e}")
+            return []
+
+    # SQLite Fallback
+    conn = sqlite3.connect(SQLITE_DB_PATH)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM tasks WHERE user_id = ? AND status = 'pending' AND due_date IS NOT NULL AND due_date < ?",
+            (user_id, now_str)
+        )
+        rows = cursor.fetchall()
+    finally:
+        conn.close()
+
+    return [_row_to_task_dict(row) for row in rows]
+
+def get_today_tasks(user_id: str) -> list:
+    """Gets pending tasks due today + habits due today + overdue tasks."""
+    user_id = str(user_id)
+    today_str = get_ist_date_str()
+
+    if not use_sqlite and db:
+        try:
+            tasks_ref = db.collection("task_bot_tasks")
+            docs = tasks_ref.where("user_id", "==", user_id) \
+                            .where("status", "==", "pending") \
+                            .stream()
+            result = []
+            for doc in docs:
+                t = doc.to_dict()
+                due = t.get("due_date")
+                is_habit = t.get("is_habit", False)
+                if is_habit:
+                    result.append(t)
+                elif due and due[:10] <= today_str:
+                    result.append(t)
+            return result
+        except Exception as e:
+            logger.error(f"Firestore get_today_tasks error: {e}")
+            return []
+
+    # SQLite Fallback
+    conn = sqlite3.connect(SQLITE_DB_PATH)
+    try:
+        cursor = conn.cursor()
+        # Pending tasks due today or overdue, plus pending habits
+        cursor.execute(
+            "SELECT * FROM tasks WHERE user_id = ? AND status = 'pending' AND (is_habit = 1 OR (due_date IS NOT NULL AND SUBSTR(due_date, 1, 10) <= ?))",
+            (user_id, today_str)
+        )
+        rows = cursor.fetchall()
+    finally:
+        conn.close()
+
+    return [_row_to_task_dict(row) for row in rows]
+
+def search_tasks(user_id: str, query: str) -> list:
+    """Searches tasks by title/description matching."""
+    user_id = str(user_id)
+    search_pattern = f"%{query}%"
+
+    if not use_sqlite and db:
+        try:
+            # Firestore has no LIKE; fetch all and filter in-memory
+            tasks_ref = db.collection("task_bot_tasks")
+            docs = tasks_ref.where("user_id", "==", user_id).stream()
+            result = []
+            query_lower = query.lower()
+            for doc in docs:
+                t = doc.to_dict()
+                title = (t.get("title") or "").lower()
+                desc = (t.get("description") or "").lower()
+                if query_lower in title or query_lower in desc:
+                    result.append(t)
+            return result
+        except Exception as e:
+            logger.error(f"Firestore search_tasks error: {e}")
+            return []
+
+    # SQLite Fallback
+    conn = sqlite3.connect(SQLITE_DB_PATH)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM tasks WHERE user_id = ? AND (title LIKE ? OR description LIKE ?)",
+            (user_id, search_pattern, search_pattern)
+        )
+        rows = cursor.fetchall()
+    finally:
+        conn.close()
+
+    return [_row_to_task_dict(row) for row in rows]
+
+def use_streak_freeze(user_id: str) -> bool:
+    """Consumes 1 streak freeze to prevent streak reset. Returns True if freeze was available."""
+    user_id = str(user_id)
+    with db_lock:
+        profile = get_user_profile(user_id)
+        freezes = profile.get("streak_freezes", 0)
+        if freezes <= 0:
+            return False
+
+        if use_sqlite:
+            conn = sqlite3.connect(SQLITE_DB_PATH)
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE users SET streak_freezes = streak_freezes - 1, last_completed_date = ? WHERE user_id = ? AND streak_freezes > 0",
+                    (get_ist_date_str(), user_id)
+                )
+                affected = cursor.rowcount
+                conn.commit()
+                return affected > 0
+            finally:
+                conn.close()
+        else:
+            update_user_profile(user_id, {
+                "streak_freezes": freezes - 1,
+                "last_completed_date": get_ist_date_str()
+            })
+            return True
+
+def add_badge(user_id: str, badge: str) -> bool:
+    """Adds a badge to user's badge list if not already earned."""
+    user_id = str(user_id)
+    with db_lock:
+        profile = get_user_profile(user_id)
+        badges_raw = profile.get("badges", "[]")
+        try:
+            badges = json.loads(badges_raw) if isinstance(badges_raw, str) else badges_raw
+        except (json.JSONDecodeError, TypeError):
+            badges = []
+        if not isinstance(badges, list):
+            badges = []
+        if badge in badges:
+            return False
+        badges.append(badge)
+        update_user_profile(user_id, {"badges": json.dumps(badges)})
+        return True
+
+def get_user_badges(user_id: str) -> list:
+    """Returns list of earned badges."""
+    user_id = str(user_id)
+    profile = get_user_profile(user_id)
+    badges_raw = profile.get("badges", "[]")
+    try:
+        badges = json.loads(badges_raw) if isinstance(badges_raw, str) else badges_raw
+    except (json.JSONDecodeError, TypeError):
+        badges = []
+    if not isinstance(badges, list):
+        badges = []
+    return badges
+
+def add_task_note(task_id: str, note_text: str) -> bool:
+    """Appends a timestamped note to a task's notes list."""
+    task_id = str(task_id)
+    task = get_task(task_id)
+    if not task:
+        return False
+
+    notes = task.get("notes", [])
+    if not isinstance(notes, list):
+        notes = []
+
+    note_entry = {
+        "text": note_text,
+        "timestamp": get_ist_now().isoformat()
+    }
+    notes.append(note_entry)
+
+    return update_task(task_id, {"notes": notes})
