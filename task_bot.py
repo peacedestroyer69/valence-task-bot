@@ -85,39 +85,51 @@ async def load_extensions():
 
 @bot.event
 async def setup_hook():
-    """Performs async bot initialization: loading cogs and starting web server."""
+    """Performs async bot initialization: loading cogs, starting web server, and syncing slash commands."""
     await load_extensions()
     bot.keepalive_runner = await start_keepalive_server()
-
-@bot.event
-async def on_ready():
-    """Triggers when the bot client is ready, syncing all commands."""
-    logger.info(f"Logged in as {bot.user.name} (ID: {bot.user.id})")
     
-    # Sync command tree to target guild to prevent global sync delays
+    # Sync command tree to target guild once at startup to prevent duplicates and rate-limits
     try:
-        target_guild = discord.Object(id=1514186381348306964)
+        guild_id = int(os.getenv("GUILD_ID", "1514186381348306964"))
+        target_guild = discord.Object(id=guild_id)
         bot.tree.copy_global_to(guild=target_guild)
         synced = await bot.tree.sync(guild=target_guild)
-        logger.info(f"Successfully copied and synced {len(synced)} command(s) to target guild (ID: 1514186381348306964)")
+        logger.info(f"Successfully copied and synced {len(synced)} command(s) to target guild (ID: {guild_id})")
         
         # Clear global commands once to prevent duplicates (since commands are guild-only)
         bot.tree.clear_commands(guild=None)
         await bot.tree.sync()
         logger.info("Successfully cleared global commands to prevent duplicates.")
     except Exception as e:
-        logger.error(f"Error during slash command synchronization: {e}", exc_info=True)
+        logger.error(f"Error during slash command synchronization in setup_hook: {e}", exc_info=True)
+
+@bot.event
+async def on_ready():
+    """Triggers when the bot client is ready."""
+    logger.info(f"Logged in as {bot.user.name} (ID: {bot.user.id})")
+    
+    # Reset connection retry delay back to 5 seconds upon a successful gateway connection
+    if hasattr(bot, "retry_delay"):
+        bot.retry_delay = 5
+        logger.info("Gateway connection retry delay has been reset to 5s.")
         
     logger.info("Task Bot is fully initialized and operational.")
 
 # --- Channel Moderation Logic ---
+LEADERBOARD_CHANNEL_ID = int(os.getenv("LEADERBOARD_CHANNEL_ID", "1514208164071870514"))
+CELEBRATION_CHANNEL_ID = int(os.getenv("CELEBRATION_CHANNEL_ID", "1514208252760424591"))
+LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "1514208220946763807"))
+
 MODERATED_CHANNELS = {
-    1514208164071870514: "leaderboard",
-    1514208252760424591: "celebration",
-    1514208220946763807: "study-logs"
+    LEADERBOARD_CHANNEL_ID: "leaderboard",
+    CELEBRATION_CHANNEL_ID: "celebration",
+    LOG_CHANNEL_ID: "study-logs"
 }
-YPT_BOT_ID = 1514205975748411402
-REPORT_USERS = [856485470171299891, 1403716456025165864]
+YPT_BOT_ID = int(os.getenv("YPT_BOT_ID", "1514205975748411402"))
+
+report_users_str = os.getenv("REPORT_USERS", "856485470171299891,1403716456025165864")
+REPORT_USERS = [int(uid.strip()) for uid in report_users_str.split(",") if uid.strip()]
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -146,10 +158,12 @@ async def on_message(message: discord.Message):
             except Exception as e:
                 logger.error(f"Failed to delete message in moderated channel: {e}")
                 
-            # Report the deletion via DM
+            # Report the deletion via DM (looking up local cache first)
             for r_user_id in REPORT_USERS:
                 try:
-                    user = await bot.fetch_user(r_user_id)
+                    user = bot.get_user(r_user_id)
+                    if not user:
+                        user = await bot.fetch_user(r_user_id)
                     if user:
                         embed = discord.Embed(
                             title="🚨 Task Bot Moderation: Message Deleted",
@@ -167,13 +181,12 @@ async def on_message(message: discord.Message):
                     logger.error(f"Could not send DM report to user {r_user_id}: {e}")
 
 async def main():
-    await start_keepalive_server()
     token = os.getenv("TASK_BOT_TOKEN")
     if not token:
         logger.critical("TASK_BOT_TOKEN is not set in environment variables. Exiting.")
         return
 
-    retry_delay = 5  # Initial backoff delay in seconds
+    bot.retry_delay = 5  # Initial backoff delay in seconds
     max_delay = 300  # Maximum backoff delay (5 minutes)
 
     async with bot:
@@ -192,23 +205,23 @@ async def main():
                 if status == 429 or "429" in str(e) or "1015" in str(e):
                     logger.warning(
                         f"Discord gateway rate limit hit (HTTP 429 / Error 1015). "
-                        f"Retrying in {retry_delay} seconds... Error: {e}"
+                        f"Retrying in {bot.retry_delay} seconds... Error: {e}"
                     )
                 else:
                     logger.warning(
                         f"Discord connection failed with HTTP exception: {e}. "
-                        f"Retrying in {retry_delay} seconds..."
+                        f"Retrying in {bot.retry_delay} seconds..."
                     )
-                await asyncio.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, max_delay)
+                await asyncio.sleep(bot.retry_delay)
+                bot.retry_delay = min(bot.retry_delay * 2, max_delay)
             except Exception as e:
                 logger.warning(
                     f"Unexpected connection/network error in task bot main: {e}. "
-                    f"Retrying in {retry_delay} seconds...",
+                    f"Retrying in {bot.retry_delay} seconds...",
                     exc_info=True
                 )
-                await asyncio.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, max_delay)
+                await asyncio.sleep(bot.retry_delay)
+                bot.retry_delay = min(bot.retry_delay * 2, max_delay)
 
 # Entry point
 if __name__ == "__main__":

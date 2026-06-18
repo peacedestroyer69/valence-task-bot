@@ -6,6 +6,7 @@ import sqlite3
 import firebase_admin
 from firebase_admin import credentials, firestore
 from dotenv import load_dotenv
+import threading
 
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 logger = logging.getLogger("TaskBot.Database")
@@ -13,6 +14,7 @@ logger = logging.getLogger("TaskBot.Database")
 # Global clients
 db = None
 use_sqlite = True
+db_lock = threading.RLock()
 
 # --- Firebase Initialization ---
 try:
@@ -32,7 +34,7 @@ except Exception as e:
 
 # --- Local SQLite Fallback Setup ---
 APPDATA_DIR = r"C:\Users\ROG\.gemini\antigravity"
-if not os.path.exists(APPDATA_DIR):
+if not os.path.exists(APPDATA_DIR) or not os.access(APPDATA_DIR, os.W_OK):
     APPDATA_DIR = os.path.join(os.path.expanduser("~"), ".gemini", "antigravity")
     try:
         os.makedirs(APPDATA_DIR, exist_ok=True)
@@ -138,6 +140,7 @@ def get_user_profile(user_id: str) -> dict:
                 return default_profile
         except Exception as e:
             logger.error(f"Firestore get_user_profile error: {e}")
+            raise e
             
     # SQLite Fallback
     conn = sqlite3.connect(SQLITE_DB_PATH)
@@ -173,6 +176,7 @@ def update_user_profile(user_id: str, updates: dict) -> bool:
             return True
         except Exception as e:
             logger.error(f"Firestore update_user_profile error: {e}")
+            raise e
             
     # SQLite Fallback
     conn = sqlite3.connect(SQLITE_DB_PATH)
@@ -193,48 +197,50 @@ def update_user_profile(user_id: str, updates: dict) -> bool:
 
 def add_xp(user_id: str, amount: int) -> tuple:
     """Awards XP to a user and handles leveling up. Returns (new_xp, new_level, leveled_up: bool)."""
-    profile = get_user_profile(user_id)
-    current_xp = profile.get("xp", 0) + amount
-    current_level = profile.get("level", 1)
-    leveled_up = False
-    
-    # Simple leveling formula: Level N requires N * 1000 XP
-    while current_xp >= current_level * 1000:
-        current_xp -= current_level * 1000
-        current_level += 1
-        leveled_up = True
+    with db_lock:
+        profile = get_user_profile(user_id)
+        current_xp = profile.get("xp", 0) + amount
+        current_level = profile.get("level", 1)
+        leveled_up = False
         
-    update_user_profile(user_id, {
-        "xp": current_xp,
-        "level": current_level
-    })
-    return current_xp, current_level, leveled_up
+        # Simple leveling formula: Level N requires N * 1000 XP
+        while current_xp >= current_level * 1000:
+            current_xp -= current_level * 1000
+            current_level += 1
+            leveled_up = True
+            
+        update_user_profile(user_id, {
+            "xp": current_xp,
+            "level": current_level
+        })
+        return current_xp, current_level, leveled_up
 
 def update_streak(user_id: str) -> int:
     """Updates daily completion streak based on completion calendar in IST. Returns current streak."""
-    profile = get_user_profile(user_id)
-    today_str = get_ist_date_str()
-    last_completed = profile.get("last_completed_date")
-    current_streak = profile.get("streak", 0)
-    
-    if last_completed == today_str:
-        # Already completed a task today, streak is maintained
-        pass
-    else:
-        # Check if last completion was yesterday in IST
-        today = get_ist_now().date()
-        yesterday_str = (today - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
-        if last_completed == yesterday_str:
-            current_streak += 1
-        else:
-            current_streak = 1
+    with db_lock:
+        profile = get_user_profile(user_id)
+        today_str = get_ist_date_str()
+        last_completed = profile.get("last_completed_date")
+        current_streak = profile.get("streak", 0)
         
-    update_user_profile(user_id, {
-        "streak": current_streak,
-        "last_completed_date": today_str,
-        "total_completed": profile.get("total_completed", 0) + 1
-    })
-    return current_streak
+        if last_completed == today_str:
+            # Already completed a task today, streak is maintained
+            pass
+        else:
+            # Check if last completion was yesterday in IST
+            today = get_ist_now().date()
+            yesterday_str = (today - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+            if last_completed == yesterday_str:
+                current_streak += 1
+            else:
+                current_streak = 1
+            
+        update_user_profile(user_id, {
+            "streak": current_streak,
+            "last_completed_date": today_str,
+            "total_completed": profile.get("total_completed", 0) + 1
+        })
+        return current_streak
 
 # --- Task Operations ---
 
@@ -274,6 +280,7 @@ def add_task(user_id: str, title: str, description: str = "", due_date: str = No
             return task_id
         except Exception as e:
             logger.error(f"Firestore add_task error: {e}")
+            raise e
             
     # SQLite Fallback
     conn = sqlite3.connect(SQLITE_DB_PATH)
@@ -307,6 +314,7 @@ def get_task(task_id: str) -> dict:
             return None
         except Exception as e:
             logger.error(f"Firestore get_task error: {e}")
+            raise e
             
     # SQLite Fallback
     conn = sqlite3.connect(SQLITE_DB_PATH)
@@ -369,48 +377,52 @@ def get_user_tasks(user_id: str, status: str = None, category: str = None, prior
             return filtered_tasks
         except Exception as e:
             logger.error(f"Firestore get_user_tasks error: {e}")
+            raise e
             
     # SQLite Fallback
     conn = sqlite3.connect(SQLITE_DB_PATH)
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM tasks")
+        query = "SELECT * FROM tasks WHERE user_id = ? OR shared_with LIKE ?"
+        params = [user_id, f'%"{user_id}"%']
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        if category:
+            query += " AND category = ?"
+            params.append(category)
+        if priority:
+            query += " AND priority = ?"
+            params.append(priority)
+            
+        cursor.execute(query, tuple(params))
         rows = cursor.fetchall()
     finally:
         conn.close()
     
     tasks = []
     for row in rows:
-        shared_list = json.loads(row[11])
-        if row[1] == user_id or user_id in shared_list:
-            t = {
-                "task_id": row[0],
-                "user_id": row[1],
-                "title": row[2],
-                "description": row[3],
-                "due_date": row[4],
-                "priority": row[5],
-                "category": row[6],
-                "is_private": bool(row[7]),
-                "status": row[8],
-                "created_at": row[9],
-                "completed_at": row[10],
-                "shared_with": shared_list,
-                "checklist": json.loads(row[12]),
-                "pomodoros_estimated": row[13],
-                "pomodoros_completed": row[14],
-                "recurrence": row[15],
-                "is_habit": bool(row[16]),
-                "due_warning_sent": bool(row[17]) if len(row) > 17 else False,
-                "remind_at": row[18] if len(row) > 18 else None
-            }
-            if status and t["status"] != status:
-                continue
-            if category and t["category"] != category:
-                continue
-            if priority and t["priority"] != priority:
-                continue
-            tasks.append(t)
+        tasks.append({
+            "task_id": row[0],
+            "user_id": row[1],
+            "title": row[2],
+            "description": row[3],
+            "due_date": row[4],
+            "priority": row[5],
+            "category": row[6],
+            "is_private": bool(row[7]),
+            "status": row[8],
+            "created_at": row[9],
+            "completed_at": row[10],
+            "shared_with": json.loads(row[11]),
+            "checklist": json.loads(row[12]),
+            "pomodoros_estimated": row[13],
+            "pomodoros_completed": row[14],
+            "recurrence": row[15],
+            "is_habit": bool(row[16]),
+            "due_warning_sent": bool(row[17]) if len(row) > 17 else False,
+            "remind_at": row[18] if len(row) > 18 else None
+        })
     return tasks
 
 def get_all_pending_tasks() -> list:
@@ -466,6 +478,7 @@ def update_task(task_id: str, updates: dict) -> bool:
             return True
         except Exception as e:
             logger.error(f"Firestore update_task error: {e}")
+            raise e
             
     # SQLite Fallback
     task = get_task(task_id)
@@ -502,6 +515,7 @@ def delete_task(task_id: str) -> bool:
             return True
         except Exception as e:
             logger.error(f"Firestore delete_task error: {e}")
+            raise e
             
     # SQLite Fallback
     conn = sqlite3.connect(SQLITE_DB_PATH)
@@ -516,9 +530,10 @@ def delete_task(task_id: str) -> bool:
 
 def complete_task(user_id: str, task_id: str) -> tuple:
     """Marks a task completed, awards XP, and updates streaks. Returns (success, task, stats)."""
-    user_id = str(user_id)
-    task_id = str(task_id)
-    task = get_task(task_id)
+    with db_lock:
+        user_id = str(user_id)
+        task_id = str(task_id)
+        task = get_task(task_id)
     if not task:
         return False, None, {}
         
@@ -568,13 +583,13 @@ def get_leaderboard() -> list:
     """Returns users ranked by Level and XP descending (fixing the rollover sorting issue)."""
     if not use_sqlite and db:
         try:
-            docs = db.collection("task_bot_users") \
-                     .order_by("level", direction=firestore.Query.DESCENDING) \
-                     .order_by("xp", direction=firestore.Query.DESCENDING) \
-                     .limit(10).stream()
-            return [doc.to_dict() for doc in docs]
+            docs = db.collection("task_bot_users").stream()
+            users = [doc.to_dict() for doc in docs]
+            users.sort(key=lambda u: (u.get("level", 1), u.get("xp", 0)), reverse=True)
+            return users[:10]
         except Exception as e:
             logger.error(f"Firestore get_leaderboard error: {e}")
+            raise e
             
     # SQLite Fallback
     conn = sqlite3.connect(SQLITE_DB_PATH)
@@ -609,7 +624,7 @@ def fetch_completed_habits() -> list:
             return [doc.to_dict() for doc in docs]
         except Exception as e:
             logger.error(f"Firestore fetch_completed_habits error: {e}")
-            return []
+            raise e
             
     # SQLite Fallback
     conn = sqlite3.connect(SQLITE_DB_PATH)
@@ -648,3 +663,44 @@ def fetch_completed_habits() -> list:
 def reset_habit(task_id: str):
     """Resets a completed habit status back to pending."""
     update_task(task_id, {"status": "pending", "completed_at": None})
+
+def get_last_habit_reset_date() -> str:
+    """Retrieves the last date habit resets were executed."""
+    if not use_sqlite and db:
+        try:
+            doc = db.collection("task_bot_config").document("settings").get()
+            if doc.exists:
+                return doc.to_dict().get("last_habit_reset_date")
+            return None
+        except Exception as e:
+            logger.error(f"Firestore get_last_habit_reset_date error: {e}", exc_info=True)
+            raise
+    # SQLite
+    conn = sqlite3.connect(SQLITE_DB_PATH)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)")
+        cursor.execute("SELECT value FROM config WHERE key = 'last_habit_reset_date'")
+        row = cursor.fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+def set_last_habit_reset_date(date_str: str):
+    """Sets the last date habit resets were executed."""
+    if not use_sqlite and db:
+        try:
+            db.collection("task_bot_config").document("settings").set({"last_habit_reset_date": date_str}, merge=True)
+            return
+        except Exception as e:
+            logger.error(f"Firestore set_last_habit_reset_date error: {e}", exc_info=True)
+            raise
+    # SQLite
+    conn = sqlite3.connect(SQLITE_DB_PATH)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)")
+        cursor.execute("INSERT OR REPLACE INTO config (key, value) VALUES ('last_habit_reset_date', ?)", (date_str,))
+        conn.commit()
+    finally:
+        conn.close()
