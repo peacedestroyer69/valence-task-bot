@@ -959,9 +959,12 @@ class TasksCog(commands.Cog, name="Tasks"):
         self.planner_alerts_task.cancel()
         
         # Cancel all active focus timer tasks
-        for session_task in list(self.active_focus_sessions.values()):
+        for session in list(self.active_focus_sessions.values()):
             try:
-                session_task.cancel()
+                if isinstance(session, dict):
+                    session["task"].cancel()
+                else:
+                    session.cancel()
             except Exception as e:
                 logger.error(f"[TASKS] Error cancelling focus session task: {e}")
 
@@ -971,10 +974,16 @@ class TasksCog(commands.Cog, name="Tasks"):
     # Autocomplete handler
     async def task_id_autocomplete(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
         user_id_str = str(interaction.user.id)
-        # Safely fetch all pending and completed tasks for the user (owned or shared)
         tasks_list = await asyncio.to_thread(task_db.get_user_tasks, user_id_str)
         
         current = current.lower()
+        # Sort: pending first (by priority High>Med>Low), then completed
+        prio_order = {"High": 0, "Medium": 1, "Low": 2}
+        tasks_list.sort(key=lambda t: (
+            0 if t.get("status") == "pending" else 1,
+            prio_order.get(t.get("priority"), 1)
+        ))
+        
         choices = []
         for t in tasks_list:
             title = t.get("title", "")
@@ -1143,7 +1152,9 @@ class TasksCog(commands.Cog, name="Tasks"):
                     habits = [t for t in tasks_list if t.get("is_habit") and t.get("status") == "pending"]
                     sorted_pending = sorted(pending, key=lambda x: {"High": 3, "Medium": 2, "Low": 1}.get(x.get("priority", "Medium"), 2), reverse=True)
                     
-                    color = 0x5865F2 if uid_str == "856485470171299891" else 0xEB459E
+                    report_users_str = os.getenv("REPORT_USERS", "856485470171299891,1403716456025165864")
+                    report_users = [u.strip() for u in report_users_str.split(",") if u.strip()]
+                    color = 0x5865F2 if uid_str in report_users else 0xEB459E
                     embed = discord.Embed(
                         title=f"☀️ Good Morning, {user.display_name}! Here is your Agenda",
                         description=f"Start your day strong! Current streak: 🔥 **{profile.get('streak', 0)} days**",
@@ -1212,7 +1223,9 @@ class TasksCog(commands.Cog, name="Tasks"):
                     
                     file = await asyncio.to_thread(self.generate_productivity_chart, completed)
                     
-                    color = 0x5865F2 if uid_str == "856485470171299891" else 0xEB459E
+                    report_users_str = os.getenv("REPORT_USERS", "856485470171299891,1403716456025165864")
+                    report_users = [u.strip() for u in report_users_str.split(",") if u.strip()]
+                    color = 0x5865F2 if uid_str in report_users else 0xEB459E
                     embed = discord.Embed(
                         title="📈 Your Weekly Productivity Digest",
                         description=f"Congratulations on a focused week! Here is your weekly completions graph.",
@@ -2684,6 +2697,141 @@ class TasksCog(commands.Cog, name="Tasks"):
         embed.add_field(name="🔍 Assessment", value=status, inline=False)
 
         await interaction.followup.send(embed=embed)
+
+    # 33. CLONE TASK
+    @task_group.command(name="clone", description="Duplicate a task with all its details")
+    @app_commands.describe(task_id="The UUID of the task to clone")
+    @app_commands.autocomplete(task_id=task_id_autocomplete)
+    async def task_clone(self, interaction: discord.Interaction, task_id: str):
+        task = await asyncio.to_thread(task_db.get_task, task_id)
+        if not task:
+            await interaction.response.send_message("❌ Task not found.", ephemeral=True)
+            return
+        if task.get("user_id") != str(interaction.user.id):
+            await interaction.response.send_message("❌ You are not the owner of this task.", ephemeral=True)
+            return
+
+        # Clone with fresh state
+        new_id = await asyncio.to_thread(
+            task_db.add_task,
+            user_id=str(interaction.user.id),
+            title=f"{task.get('title', 'Untitled')} (copy)",
+            description=task.get("description"),
+            due_date=task.get("due_date"),
+            priority=task.get("priority", "Medium"),
+            category=task.get("category", "General"),
+            is_private=task.get("is_private", False),
+            recurrence=task.get("recurrence"),
+            is_habit=task.get("is_habit", False),
+            pomodoros_estimated=task.get("pomodoros_estimated", 1)
+        )
+
+        embed = discord.Embed(
+            title="📋 Task Cloned!",
+            description=f"**{task.get('title')}** → **{task.get('title')} (copy)**",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="New ID", value=f"`{new_id[:8]}`", inline=True)
+        embed.add_field(name="Status", value="⏳ Pending (fresh start)", inline=True)
+        embed.set_footer(text="Edit the clone with /task edit if needed")
+        await interaction.response.send_message(embed=embed, ephemeral=task.get("is_private"))
+
+    # 34. OVERDUE TASKS
+    @task_group.command(name="overdue", description="List all your overdue tasks")
+    async def task_overdue(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        user_id_str = str(interaction.user.id)
+        all_tasks = await asyncio.to_thread(task_db.get_user_tasks, user_id_str)
+        pending = [t for t in all_tasks if t.get("status") == "pending" and t.get("due_date")]
+
+        now = task_db.get_ist_now()
+        overdue = []
+        for t in pending:
+            for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+                try:
+                    due = datetime.datetime.strptime(t["due_date"].strip(), fmt)
+                    if due < now:
+                        hours_late = (now - due).total_seconds() / 3600
+                        overdue.append((hours_late, t))
+                    break
+                except ValueError:
+                    continue
+
+        if not overdue:
+            embed = discord.Embed(
+                title="✨ No Overdue Tasks!",
+                description="You're all caught up. Nothing is past due.",
+                color=discord.Color.green()
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        overdue.sort(key=lambda x: x[0], reverse=True)  # Most overdue first
+
+        embed = discord.Embed(
+            title=f"🚨 Overdue Tasks — {len(overdue)} items",
+            description="These tasks are past their deadline:",
+            color=discord.Color.red()
+        )
+
+        lines = []
+        for hours_late, t in overdue[:15]:
+            prio = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}.get(t.get("priority"), "🟡")
+            if hours_late >= 48:
+                late_str = f"**{int(hours_late/24)}d** late"
+            else:
+                late_str = f"**{int(hours_late)}h** late"
+            lines.append(f"{prio} **{t['title'][:40]}** — {late_str} ⏰`{t['due_date'][:10]}`")
+
+        if len(overdue) > 15:
+            lines.append(f"*...and {len(overdue) - 15} more*")
+
+        embed.description = "\n".join(lines)
+        embed.set_footer(text="Use /task reschedule to fix deadlines, or /task bulkcomplete to clear them")
+        await interaction.followup.send(embed=embed)
+
+    # 35. CLEANUP OLD COMPLETED TASKS
+    @task_group.command(name="cleanup", description="Delete all completed tasks older than N days")
+    @app_commands.describe(days="Delete completed tasks older than this many days (default: 30)")
+    async def task_cleanup(self, interaction: discord.Interaction, days: int = 30):
+        if days < 1:
+            await interaction.response.send_message("❌ Days must be at least 1.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        user_id_str = str(interaction.user.id)
+        all_tasks = await asyncio.to_thread(task_db.get_user_tasks, user_id_str)
+
+        now = task_db.get_ist_now()
+        cutoff = now - datetime.timedelta(days=days)
+        cutoff_str = cutoff.strftime("%Y-%m-%d")
+
+        to_delete = [
+            t for t in all_tasks
+            if t.get("status") == "completed"
+            and (t.get("completed_at") or "9999")[:10] < cutoff_str
+        ]
+
+        if not to_delete:
+            await interaction.followup.send(f"✨ No completed tasks older than {days} days found.", ephemeral=True)
+            return
+
+        # Delete them
+        deleted_count = 0
+        for t in to_delete:
+            try:
+                await asyncio.to_thread(task_db.delete_task, str(interaction.user.id), t["task_id"])
+                deleted_count += 1
+            except Exception:
+                pass
+
+        embed = discord.Embed(
+            title="🧹 Cleanup Complete",
+            description=f"Deleted **{deleted_count}** completed tasks older than **{days} days**.",
+            color=discord.Color.green()
+        )
+        embed.set_footer(text=f"Cutoff date: {cutoff_str}")
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     # --- Helper Logic methods ---
 
