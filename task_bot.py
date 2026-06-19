@@ -126,7 +126,7 @@ MODERATED_CHANNELS = {
     CELEBRATION_CHANNEL_ID: "celebration",
     LOG_CHANNEL_ID: "study-logs"
 }
-YPT_BOT_ID = int(os.getenv("YPT_BOT_ID", "1514205975748411402"))
+YPT_BOT_ID = int(os.getenv("YPT_BOT_ID", "1517449638091689985"))
 
 report_users_str = os.getenv("REPORT_USERS", "856485470171299891,1403716456025165864")
 REPORT_USERS = [int(uid.strip()) for uid in report_users_str.split(",") if uid.strip()]
