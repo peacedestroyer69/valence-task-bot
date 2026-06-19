@@ -1565,32 +1565,54 @@ class TasksCog(commands.Cog, name="Tasks"):
             
         await interaction.followup.send(embed=embed)
 
-    # 10. LEADERBOARD
-    @task_group.command(name="leaderboard", description="View server productivity rankings")
-    async def task_leaderboard(self, interaction: discord.Interaction):
+    # 10. WEEKLY TASK BOARD (task-focused, NOT XP-based like YPT)
+    @task_group.command(name="board", description="Weekly task completion board — who shipped the most this week")
+    async def task_board(self, interaction: discord.Interaction):
+        await interaction.response.defer()
         leaderboard = await asyncio.to_thread(task_db.get_leaderboard)
         if not leaderboard:
-            await interaction.response.send_message("📭 Leaderboard is empty.", ephemeral=True)
+            await interaction.response.send_message("📭 No users found.", ephemeral=True)
             return
-            
+
+        now = task_db.get_ist_now()
+        week_start = now - datetime.timedelta(days=now.weekday())
+        week_start_str = week_start.strftime("%Y-%m-%d")
+
+        # Build weekly completion counts per user
+        user_weekly = []
+        for entry in leaderboard:
+            uid = entry["user_id"]
+            all_tasks = await asyncio.to_thread(task_db.get_user_tasks, uid)
+            weekly_done = len([
+                t for t in all_tasks 
+                if t.get("status") == "completed" and (t.get("completed_at") or "")[:10] >= week_start_str
+            ])
+            pending = len([t for t in all_tasks if t.get("status") == "pending"])
+            user_weekly.append({"user_id": uid, "weekly": weekly_done, "pending": pending, "streak": entry.get("streak", 0)})
+
+        user_weekly.sort(key=lambda x: x["weekly"], reverse=True)
+
         embed = discord.Embed(
-            title="🏆 Server Productivity Leaderboard",
-            description="Ranked by total productivity level and accumulated XP.",
-            color=discord.Color.gold()
+            title="📊 Weekly Task Board",
+            description=f"Who completed the most tasks this week (since {week_start_str})?",
+            color=discord.Color.teal()
         )
-        
-        lines = []
+
         medals = ["🥇", "🥈", "🥉"]
-        for idx, entry in enumerate(leaderboard):
+        lines = []
+        for idx, entry in enumerate(user_weekly[:10]):
             medal = medals[idx] if idx < 3 else f"`#{idx+1}`"
             user = self.bot.get_user(int(entry["user_id"]))
             username = user.display_name if user else f"User {entry['user_id']}"
+            bar_len = min(entry["weekly"], 10)
+            bar = "█" * bar_len + "░" * (10 - bar_len)
             lines.append(
-                f"{medal} **{username}** — Level {entry['level']} | {entry['xp']} XP | 🔥 {entry['streak']}d streak"
+                f"{medal} **{username}** `{bar}` **{entry['weekly']}** done | {entry['pending']} pending | 🔥{entry['streak']}d"
             )
-            
-        embed.description = "\n\n".join(lines)
-        await interaction.response.send_message(embed=embed)
+
+        embed.description += "\n\n" + "\n".join(lines)
+        embed.set_footer(text="Ranked by tasks COMPLETED this week, not XP")
+        await interaction.followup.send(embed=embed)
 
     # 11. WEEKLY PRODUCTIVITY GRAPH
     @task_group.command(name="graph", description="Show a visual trend chart of your weekly task completions")
@@ -2068,59 +2090,196 @@ class TasksCog(commands.Cog, name="Tasks"):
         embed.set_footer(text=f"{len(sessions)} active session(s)")
         await interaction.response.send_message(embed=embed)
 
-    # 24. CHALLENGE
-    @task_group.command(name="challenge", description="Challenge a friend to complete more tasks today!")
-    @app_commands.describe(user="The user to challenge")
-    async def task_challenge(self, interaction: discord.Interaction, user: discord.Member):
-        if user.bot:
-            await interaction.response.send_message("❌ You can't challenge a bot!", ephemeral=True)
-            return
-        if user.id == interaction.user.id:
-            await interaction.response.send_message("❌ You can't challenge yourself!", ephemeral=True)
-            return
+    # 24. KANBAN BOARD VIEW
+    @task_group.command(name="kanban", description="Visual Kanban board — see all tasks by status")
+    async def task_kanban(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        user_id_str = str(interaction.user.id)
+        all_tasks = await asyncio.to_thread(task_db.get_user_tasks, user_id_str)
 
-        # Get both users' today stats
-        challenger_id = str(interaction.user.id)
-        challenged_id = str(user.id)
+        pending = [t for t in all_tasks if t.get("status") == "pending" and not t.get("is_habit")]
+        habits = [t for t in all_tasks if t.get("status") == "pending" and t.get("is_habit")]
+        completed_recent = [
+            t for t in all_tasks if t.get("status") == "completed"
+        ]
+        # Only show last 5 completed
+        completed_recent.sort(key=lambda x: x.get("completed_at") or "", reverse=True)
+        completed_recent = completed_recent[:5]
 
-        challenger_tasks = await asyncio.to_thread(task_db.get_user_tasks, challenger_id)
-        challenged_tasks = await asyncio.to_thread(task_db.get_user_tasks, challenged_id)
+        # Split pending by priority
+        high = [t for t in pending if t.get("priority") == "High"]
+        medium = [t for t in pending if t.get("priority") == "Medium"]
+        low = [t for t in pending if t.get("priority") == "Low"]
 
-        today_str = task_db.get_ist_now().strftime("%Y-%m-%d")
-
-        challenger_today = len([t for t in challenger_tasks if t.get("status") == "completed" and (t.get("completed_at") or "")[:10] == today_str])
-        challenged_today = len([t for t in challenged_tasks if t.get("status") == "completed" and (t.get("completed_at") or "")[:10] == today_str])
+        report_users_str = os.getenv("REPORT_USERS", "856485470171299891,1403716456025165864")
+        report_users = [int(uid.strip()) for uid in report_users_str.split(",") if uid.strip()]
+        color = 0x5865F2 if interaction.user.id in report_users else 0xEB459E
 
         embed = discord.Embed(
-            title="⚔️ Productivity Challenge!",
-            description=f"**{interaction.user.display_name}** has challenged **{user.display_name}** to a task battle!",
-            color=discord.Color.red()
+            title=f"📋 Kanban Board — {interaction.user.display_name}",
+            color=color
         )
 
-        # Scoreboard
-        c1_bar = "🟩" * challenger_today + "⬛" * max(0, 5 - challenger_today)
-        c2_bar = "🟦" * challenged_today + "⬛" * max(0, 5 - challenged_today)
-
-        embed.add_field(
-            name=f"🟩 {interaction.user.display_name}",
-            value=f"{c1_bar}\n**{challenger_today}** tasks today",
-            inline=True
-        )
-        embed.add_field(
-            name=f"🟦 {user.display_name}",
-            value=f"{c2_bar}\n**{challenged_today}** tasks today",
-            inline=True
-        )
-
-        if challenger_today > challenged_today:
-            embed.add_field(name="🏆 Currently Winning", value=f"**{interaction.user.display_name}** is ahead!", inline=False)
-        elif challenged_today > challenger_today:
-            embed.add_field(name="🏆 Currently Winning", value=f"**{user.display_name}** is ahead!", inline=False)
+        # High priority column
+        if high:
+            lines = [f"🔴 {t['title'][:45]}" for t in high[:5]]
+            if len(high) > 5:
+                lines.append(f"*+{len(high)-5} more*")
+            embed.add_field(name=f"🔴 HIGH ({len(high)})", value="\n".join(lines), inline=True)
         else:
-            embed.add_field(name="🤝 Tied!", value="It's neck and neck! Keep going!", inline=False)
+            embed.add_field(name="🔴 HIGH (0)", value="*Empty*", inline=True)
 
-        embed.set_footer(text="Complete more tasks today to win! Use /task challenge again to check the score.")
+        # Medium priority column
+        if medium:
+            lines = [f"🟡 {t['title'][:45]}" for t in medium[:5]]
+            if len(medium) > 5:
+                lines.append(f"*+{len(medium)-5} more*")
+            embed.add_field(name=f"🟡 MEDIUM ({len(medium)})", value="\n".join(lines), inline=True)
+        else:
+            embed.add_field(name="🟡 MEDIUM (0)", value="*Empty*", inline=True)
+
+        # Low priority column
+        if low:
+            lines = [f"🟢 {t['title'][:45]}" for t in low[:5]]
+            if len(low) > 5:
+                lines.append(f"*+{len(low)-5} more*")
+            embed.add_field(name=f"🟢 LOW ({len(low)})", value="\n".join(lines), inline=True)
+        else:
+            embed.add_field(name="🟢 LOW (0)", value="*Empty*", inline=True)
+
+        # Habits row
+        if habits:
+            h_lines = [f"🔁 {t['title'][:40]} ({t.get('recurrence', 'daily')})" for t in habits[:4]]
+            embed.add_field(name=f"🔁 HABITS ({len(habits)})", value="\n".join(h_lines), inline=False)
+
+        # Recently completed
+        if completed_recent:
+            c_lines = [f"✅ ~~{t['title'][:40]}~~ — {(t.get('completed_at') or '')[:10]}" for t in completed_recent]
+            embed.add_field(name=f"✅ RECENTLY DONE ({len([t for t in all_tasks if t.get('status')=='completed'])} total)", value="\n".join(c_lines), inline=False)
+
+        embed.set_footer(text=f"Total: {len(all_tasks)} tasks • {len(pending)} pending • {len(habits)} habits")
+        await interaction.followup.send(embed=embed)
+
+    # 25-A. SPRINT GOAL
+    @task_group.command(name="sprint", description="Set or view your weekly task completion goal")
+    @app_commands.describe(target="Set a weekly goal (e.g. 10 tasks). Omit to view current progress.")
+    async def task_sprint(self, interaction: discord.Interaction, target: int = None):
+        user_id_str = str(interaction.user.id)
+        profile = await asyncio.to_thread(task_db.get_user_profile, user_id_str)
+
+        if target is not None:
+            if target < 1 or target > 100:
+                await interaction.response.send_message("❌ Sprint goal must be between 1 and 100.", ephemeral=True)
+                return
+            # Store sprint goal in user profile (using badges field temporarily as JSON won't conflict)
+            await asyncio.to_thread(task_db.update_user_profile, user_id_str, {"sprint_goal": target})
+            embed = discord.Embed(
+                title="🏃 Sprint Goal Set!",
+                description=f"Your weekly target: **{target} tasks**\nGet it done by Sunday!",
+                color=discord.Color.green()
+            )
+            await interaction.response.send_message(embed=embed)
+            return
+
+        # View progress
+        now = task_db.get_ist_now()
+        week_start = now - datetime.timedelta(days=now.weekday())
+        week_start_str = week_start.strftime("%Y-%m-%d")
+        
+        all_tasks = await asyncio.to_thread(task_db.get_user_tasks, user_id_str)
+        weekly_done = len([
+            t for t in all_tasks
+            if t.get("status") == "completed" and (t.get("completed_at") or "")[:10] >= week_start_str
+        ])
+
+        goal = profile.get("sprint_goal", 7)  # Default 7 tasks/week
+        pct = min(1.0, weekly_done / goal) if goal > 0 else 0
+        filled = int(pct * 15)
+        bar = "█" * filled + "░" * (15 - filled)
+        days_left = 6 - now.weekday()
+
+        if pct >= 1.0:
+            status = "🎉 **SPRINT COMPLETE!** You crushed it!"
+        elif pct >= 0.7:
+            status = "🔥 Almost there! Keep pushing!"
+        elif pct >= 0.3:
+            status = f"⏳ {days_left} days left. You got this!"
+        else:
+            status = f"🚀 Time to grind! {days_left} days remaining."
+
+        embed = discord.Embed(
+            title=f"🏃 Weekly Sprint — {interaction.user.display_name}",
+            color=discord.Color.green() if pct >= 1.0 else discord.Color.orange()
+        )
+        embed.add_field(
+            name="Progress",
+            value=f"`{bar}` **{weekly_done}/{goal}** ({int(pct*100)}%)",
+            inline=False
+        )
+        embed.add_field(name="Status", value=status, inline=False)
+        embed.set_footer(text=f"Week of {week_start_str} • Use /task sprint <number> to set goal")
         await interaction.response.send_message(embed=embed)
+
+    # 25-B. EISENHOWER PRIORITY MATRIX
+    @task_group.command(name="matrix", description="Eisenhower matrix — see tasks by urgency vs importance")
+    async def task_matrix(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        user_id_str = str(interaction.user.id)
+        all_tasks = await asyncio.to_thread(task_db.get_user_tasks, user_id_str)
+        pending = [t for t in all_tasks if t.get("status") == "pending" and not t.get("is_habit")]
+
+        now = task_db.get_ist_now()
+        urgent_threshold = now + datetime.timedelta(days=2)  # Due within 2 days = urgent
+
+        # Classify each task
+        q1_urgent_important = []  # High priority + due soon → DO FIRST
+        q2_not_urgent_important = []  # High priority + not due soon → SCHEDULE
+        q3_urgent_not_important = []  # Low/Med priority + due soon → DELEGATE
+        q4_neither = []  # Low/Med priority + not due soon → BACKLOG
+
+        for t in pending:
+            is_high = t.get("priority") == "High"
+            is_urgent = False
+            if t.get("due_date"):
+                for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+                    try:
+                        due = datetime.datetime.strptime(t["due_date"].strip(), fmt)
+                        is_urgent = due <= urgent_threshold
+                        break
+                    except ValueError:
+                        continue
+
+            if is_high and is_urgent:
+                q1_urgent_important.append(t)
+            elif is_high and not is_urgent:
+                q2_not_urgent_important.append(t)
+            elif not is_high and is_urgent:
+                q3_urgent_not_important.append(t)
+            else:
+                q4_neither.append(t)
+
+        embed = discord.Embed(
+            title="🧠 Eisenhower Priority Matrix",
+            description="Tasks sorted by urgency (due ≤ 2 days) × importance (High priority)",
+            color=0xFF6B6B
+        )
+
+        def fmt_quadrant(tasks, limit=4):
+            if not tasks:
+                return "*Empty — nice!*"
+            lines = [f"• {t['title'][:40]}" + (f" ⏰`{t.get('due_date','')[:10]}`" if t.get('due_date') else "") for t in tasks[:limit]]
+            if len(tasks) > limit:
+                lines.append(f"*+{len(tasks)-limit} more*")
+            return "\n".join(lines)
+
+        embed.add_field(name=f"🔴 DO FIRST ({len(q1_urgent_important)})", value=fmt_quadrant(q1_urgent_important), inline=True)
+        embed.add_field(name=f"🟡 SCHEDULE ({len(q2_not_urgent_important)})", value=fmt_quadrant(q2_not_urgent_important), inline=True)
+        embed.add_field(name="\u200b", value="\u200b", inline=False)  # Spacer row
+        embed.add_field(name=f"🟠 QUICK WINS ({len(q3_urgent_not_important)})", value=fmt_quadrant(q3_urgent_not_important), inline=True)
+        embed.add_field(name=f"⚪ BACKLOG ({len(q4_neither)})", value=fmt_quadrant(q4_neither), inline=True)
+
+        embed.set_footer(text=f"{len(pending)} pending tasks analyzed")
+        await interaction.followup.send(embed=embed)
 
     # 25. EXPORT
     @task_group.command(name="export", description="Export your tasks as a CSV file")

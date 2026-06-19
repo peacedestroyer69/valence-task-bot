@@ -17,7 +17,7 @@ use_sqlite = True
 db_lock = threading.RLock()
 
 # --- Column Whitelists (SQL injection prevention) ---
-ALLOWED_USER_FIELDS = {"xp", "level", "streak", "last_completed_date", "total_completed", "best_streak", "streak_freezes", "badges"}
+ALLOWED_USER_FIELDS = {"xp", "level", "streak", "last_completed_date", "total_completed", "best_streak", "streak_freezes", "badges", "sprint_goal"}
 ALLOWED_TASK_FIELDS = {"title", "description", "due_date", "priority", "category", "is_private", "status", "completed_at", "shared_with", "checklist", "pomodoros_estimated", "pomodoros_completed", "recurrence", "is_habit", "due_warning_sent", "remind_at", "notes"}
 
 # --- Firebase Initialization ---
@@ -66,7 +66,8 @@ def init_local_db():
                 total_completed INTEGER DEFAULT 0,
                 best_streak INTEGER DEFAULT 0,
                 streak_freezes INTEGER DEFAULT 1,
-                badges TEXT DEFAULT '[]'
+                badges TEXT DEFAULT '[]',
+                sprint_goal INTEGER DEFAULT 7
             )
         """)
         # Tasks table
@@ -102,6 +103,7 @@ def init_local_db():
             ("users", "best_streak", "INTEGER DEFAULT 0"),
             ("users", "streak_freezes", "INTEGER DEFAULT 1"),
             ("users", "badges", "TEXT DEFAULT '[]'"),
+            ("users", "sprint_goal", "INTEGER DEFAULT 7"),
         ]
         for table, col, col_type in _migrate_columns:
             try:
@@ -175,7 +177,8 @@ def get_user_profile(user_id: str) -> dict:
         "total_completed": 0,
         "best_streak": 0,
         "streak_freezes": 1,
-        "badges": "[]"
+        "badges": "[]",
+        "sprint_goal": 7
     }
     
     if not use_sqlite and db:
@@ -197,7 +200,7 @@ def get_user_profile(user_id: str) -> dict:
     conn = sqlite3.connect(SQLITE_DB_PATH)
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT xp, level, streak, last_completed_date, total_completed, best_streak, streak_freezes, badges FROM users WHERE user_id = ?", (user_id,))
+        cursor.execute("SELECT xp, level, streak, last_completed_date, total_completed, best_streak, streak_freezes, badges, sprint_goal FROM users WHERE user_id = ?", (user_id,))
         row = cursor.fetchone()
         if row:
             return {
@@ -209,12 +212,13 @@ def get_user_profile(user_id: str) -> dict:
                 "total_completed": row[4],
                 "best_streak": row[5] if row[5] is not None else 0,
                 "streak_freezes": row[6] if row[6] is not None else 1,
-                "badges": row[7] if row[7] is not None else "[]"
+                "badges": row[7] if row[7] is not None else "[]",
+                "sprint_goal": row[8] if row[8] is not None else 7
             }
         else:
             cursor.execute(
-                "INSERT INTO users (user_id, xp, level, streak, last_completed_date, total_completed, best_streak, streak_freezes, badges) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (user_id, 0, 1, 0, None, 0, 0, 1, "[]")
+                "INSERT INTO users (user_id, xp, level, streak, last_completed_date, total_completed, best_streak, streak_freezes, badges, sprint_goal) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (user_id, 0, 1, 0, None, 0, 0, 1, "[]", 7)
             )
             conn.commit()
             return default_profile
