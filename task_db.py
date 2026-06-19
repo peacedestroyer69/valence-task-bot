@@ -54,6 +54,7 @@ def init_local_db():
         return
     conn = sqlite3.connect(SQLITE_DB_PATH)
     try:
+        conn.execute("PRAGMA journal_mode=WAL;")
         cursor = conn.cursor()
         # Users table
         cursor.execute("""
@@ -199,6 +200,7 @@ def get_user_profile(user_id: str) -> dict:
     # SQLite Fallback
     conn = sqlite3.connect(SQLITE_DB_PATH)
     try:
+        conn.execute("PRAGMA journal_mode=WAL;")
         cursor = conn.cursor()
         cursor.execute("SELECT xp, level, streak, last_completed_date, total_completed, best_streak, streak_freezes, badges, sprint_goal FROM users WHERE user_id = ?", (user_id,))
         row = cursor.fetchone()
