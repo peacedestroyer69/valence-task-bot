@@ -1,6 +1,7 @@
 import os
 import io
 import re
+import json
 import datetime
 import asyncio
 import logging
@@ -207,6 +208,36 @@ class TaskDetailView(discord.ui.View):
             if len(checklist_val) > 1020:
                 checklist_val = checklist_val[:1017] + "..."
             embed.add_field(name="📝 Checklist Progress", value=checklist_val, inline=False)
+
+        # Notes section
+        notes_raw = t.get("notes", "[]")
+        try:
+            notes = json.loads(notes_raw) if isinstance(notes_raw, str) else (notes_raw or [])
+        except (json.JSONDecodeError, TypeError):
+            notes = []
+        if notes:
+            recent_notes = notes[-3:]  # Show last 3 notes
+            n_lines = [f"• {n[:80]}" for n in recent_notes]
+            notes_val = "\n".join(n_lines)
+            if len(notes) > 3:
+                notes_val += f"\n*+{len(notes)-3} older notes*"
+            embed.add_field(name=f"📝 Notes ({len(notes)})", value=notes_val, inline=False)
+
+        # Shared with
+        shared = t.get("shared_with") or []
+        if shared:
+            embed.add_field(name="👥 Shared With", value=f"{len(shared)} user(s)", inline=True)
+
+        # Timestamps footer
+        created = (t.get("created_at") or "")[:16]
+        completed = (t.get("completed_at") or "")[:16]
+        footer_parts = []
+        if created:
+            footer_parts.append(f"Created: {created}")
+        if completed:
+            footer_parts.append(f"Completed: {completed}")
+        if footer_parts:
+            embed.set_footer(text=" • ".join(footer_parts))
             
         return embed
 
@@ -2363,6 +2394,296 @@ class TasksCog(commands.Cog, name="Tasks"):
         embed.description = "\n".join(lines)
         embed.set_footer(text=f"Earned: {earned_count}/{len(all_badges)} badges")
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # 27. QUICK PRIORITY CHANGE
+    @task_group.command(name="priority", description="Quickly change a task's priority")
+    @app_commands.describe(task_id="The UUID of the task", priority="New priority level")
+    @app_commands.autocomplete(task_id=task_id_autocomplete)
+    @app_commands.choices(priority=[
+        app_commands.Choice(name="🔴 High", value="High"),
+        app_commands.Choice(name="🟡 Medium", value="Medium"),
+        app_commands.Choice(name="🟢 Low", value="Low")
+    ])
+    async def task_priority(self, interaction: discord.Interaction, task_id: str, priority: str):
+        task = await asyncio.to_thread(task_db.get_task, task_id)
+        if not task:
+            await interaction.response.send_message("❌ Task not found.", ephemeral=True)
+            return
+        if task.get("user_id") != str(interaction.user.id):
+            await interaction.response.send_message("❌ You are not the owner of this task.", ephemeral=True)
+            return
+
+        await asyncio.to_thread(task_db.update_task, task_id, {"priority": priority})
+        prio_emoji = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}.get(priority, "🟡")
+        await interaction.response.send_message(
+            f"{prio_emoji} **{task['title']}** priority changed to **{priority}**.",
+            ephemeral=task.get("is_private")
+        )
+
+    # 28. BULK COMPLETE
+    @task_group.command(name="bulkcomplete", description="Complete multiple tasks at once (comma-separated IDs)")
+    @app_commands.describe(task_ids="Comma-separated task IDs to complete (e.g. 'abc123,def456')")
+    async def task_bulk_complete(self, interaction: discord.Interaction, task_ids: str):
+        await interaction.response.defer()
+        user_id_str = str(interaction.user.id)
+        ids = [tid.strip() for tid in task_ids.split(",") if tid.strip()]
+
+        if not ids:
+            await interaction.followup.send("❌ No task IDs provided.", ephemeral=True)
+            return
+        if len(ids) > 20:
+            await interaction.followup.send("❌ Maximum 20 tasks per bulk operation.", ephemeral=True)
+            return
+
+        completed = []
+        failed = []
+        total_xp = 0
+
+        for tid in ids:
+            try:
+                # Support partial IDs — find matching task
+                all_tasks = await asyncio.to_thread(task_db.get_user_tasks, user_id_str)
+                matched = [t for t in all_tasks if t.get("task_id", "").startswith(tid)]
+                if not matched:
+                    failed.append(tid[:8])
+                    continue
+                full_id = matched[0]["task_id"]
+                success, task, stats = await asyncio.to_thread(task_db.complete_task, user_id_str, full_id)
+                if success:
+                    completed.append(task.get("title", "?")[:30])
+                    total_xp += stats.get("xp_gained", 0)
+                else:
+                    failed.append(tid[:8])
+            except Exception:
+                failed.append(tid[:8])
+
+        embed = discord.Embed(
+            title=f"✅ Bulk Complete — {len(completed)}/{len(ids)} Done",
+            color=discord.Color.green() if completed else discord.Color.red()
+        )
+        if completed:
+            embed.add_field(name="Completed", value="\n".join(f"• {t}" for t in completed[:10]), inline=False)
+            embed.add_field(name="Total XP", value=f"✨ +{total_xp} XP", inline=True)
+        if failed:
+            embed.add_field(name="Failed", value=", ".join(f"`{f}`" for f in failed[:10]), inline=False)
+
+        await interaction.followup.send(embed=embed)
+
+    # 29. QUICK RESCHEDULE
+    @task_group.command(name="reschedule", description="Quickly change a task's due date")
+    @app_commands.describe(task_id="The UUID of the task", due_date="New due date (e.g. 'tomorrow', '3pm', 'next friday')")
+    @app_commands.autocomplete(task_id=task_id_autocomplete)
+    async def task_reschedule(self, interaction: discord.Interaction, task_id: str, due_date: str):
+        task = await asyncio.to_thread(task_db.get_task, task_id)
+        if not task:
+            await interaction.response.send_message("❌ Task not found.", ephemeral=True)
+            return
+        if task.get("user_id") != str(interaction.user.id):
+            await interaction.response.send_message("❌ You are not the owner of this task.", ephemeral=True)
+            return
+
+        parsed = self.parse_due_date_input(due_date)
+        if not parsed:
+            await interaction.response.send_message("❌ Invalid date format. Try '2h', 'tomorrow', '3pm', 'next monday', or 'YYYY-MM-DD HH:MM'.", ephemeral=True)
+            return
+
+        new_due = parsed.strftime("%Y-%m-%d %H:%M")
+        await asyncio.to_thread(task_db.update_task, task_id, {"due_date": new_due, "due_warning_sent": False})
+        await interaction.response.send_message(
+            f"📅 **{task['title']}** rescheduled to `{new_due}`",
+            ephemeral=task.get("is_private")
+        )
+
+    # 30. DAILY PLAN — auto-generate a prioritized daily agenda
+    @task_group.command(name="plan", description="Auto-generate your daily plan sorted by urgency")
+    async def task_plan(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        user_id_str = str(interaction.user.id)
+        all_tasks = await asyncio.to_thread(task_db.get_user_tasks, user_id_str)
+
+        pending = [t for t in all_tasks if t.get("status") == "pending"]
+        if not pending:
+            await interaction.followup.send("✨ No pending tasks. Enjoy the break!", ephemeral=True)
+            return
+
+        now = task_db.get_ist_now()
+
+        # Score each task: higher = do it first
+        scored = []
+        for t in pending:
+            score = 0.0
+            # Priority weight
+            prio_weight = {"High": 30, "Medium": 15, "Low": 5}.get(t.get("priority"), 15)
+            score += prio_weight
+
+            # Urgency weight (closer due date = higher score)
+            if t.get("due_date"):
+                for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+                    try:
+                        due = datetime.datetime.strptime(t["due_date"].strip(), fmt)
+                        hours_left = (due - now).total_seconds() / 3600
+                        if hours_left < 0:
+                            score += 50  # Overdue = maximum urgency
+                        elif hours_left < 24:
+                            score += 40
+                        elif hours_left < 48:
+                            score += 25
+                        elif hours_left < 168:  # 1 week
+                            score += 10
+                        break
+                    except ValueError:
+                        continue
+
+            # Habit bonus (daily habits should be done first)
+            if t.get("is_habit"):
+                score += 20
+
+            # Checklist progress bonus (nearly done = finish it)
+            cl = t.get("checklist") or []
+            if cl:
+                done_pct = sum(1 for c in cl if c.get("done")) / len(cl)
+                if done_pct >= 0.7:
+                    score += 15
+
+            scored.append((score, t))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        report_users_str = os.getenv("REPORT_USERS", "856485470171299891,1403716456025165864")
+        report_users = [int(uid.strip()) for uid in report_users_str.split(",") if uid.strip()]
+        color = 0x5865F2 if interaction.user.id in report_users else 0xEB459E
+
+        embed = discord.Embed(
+            title=f"📋 Today's Plan — {interaction.user.display_name}",
+            description=f"**{len(pending)} tasks** prioritized by urgency × importance:",
+            color=color
+        )
+
+        lines = []
+        for i, (score, t) in enumerate(scored[:12], 1):
+            prio = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}.get(t.get("priority"), "🟡")
+            due_text = ""
+            if t.get("due_date"):
+                due_text = f" ⏰`{t['due_date'][:10]}`"
+            habit = " 🔁" if t.get("is_habit") else ""
+            urgency = ""
+            if score >= 70:
+                urgency = " ‼️"
+            elif score >= 50:
+                urgency = " ❗"
+
+            lines.append(f"`{i:02d}.` {prio} **{t['title'][:45]}**{due_text}{habit}{urgency}")
+
+        embed.description += "\n\n" + "\n".join(lines)
+
+        if len(scored) > 12:
+            embed.set_footer(text=f"Showing top 12 of {len(scored)} tasks • Focus on the top 3-5 for best results")
+        else:
+            embed.set_footer(text="Focus on the top 3-5 items for best results")
+
+        await interaction.followup.send(embed=embed)
+
+    # 31. MOVE CATEGORY
+    @task_group.command(name="move", description="Move a task to a different category")
+    @app_commands.describe(task_id="The UUID of the task", category="New category name")
+    @app_commands.autocomplete(task_id=task_id_autocomplete)
+    async def task_move(self, interaction: discord.Interaction, task_id: str, category: str):
+        task = await asyncio.to_thread(task_db.get_task, task_id)
+        if not task:
+            await interaction.response.send_message("❌ Task not found.", ephemeral=True)
+            return
+        if task.get("user_id") != str(interaction.user.id):
+            await interaction.response.send_message("❌ You are not the owner of this task.", ephemeral=True)
+            return
+
+        old_cat = task.get("category", "General")
+        await asyncio.to_thread(task_db.update_task, task_id, {"category": category})
+        await interaction.response.send_message(
+            f"📂 **{task['title']}** moved from `{old_cat}` → `{category}`",
+            ephemeral=task.get("is_private")
+        )
+
+    # 32. WORKLOAD
+    @task_group.command(name="workload", description="Visualize your task distribution by category and priority")
+    async def task_workload(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        user_id_str = str(interaction.user.id)
+        all_tasks = await asyncio.to_thread(task_db.get_user_tasks, user_id_str)
+        pending = [t for t in all_tasks if t.get("status") == "pending"]
+
+        if not pending:
+            await interaction.followup.send("✨ No pending tasks to analyze!", ephemeral=True)
+            return
+
+        # Category distribution
+        cat_counts = {}
+        for t in pending:
+            cat = t.get("category", "General")
+            cat_counts[cat] = cat_counts.get(cat, 0) + 1
+
+        # Priority distribution
+        prio_counts = {"High": 0, "Medium": 0, "Low": 0}
+        for t in pending:
+            p = t.get("priority", "Medium")
+            prio_counts[p] = prio_counts.get(p, 0) + 1
+
+        # Overdue count
+        now = task_db.get_ist_now()
+        overdue_count = 0
+        for t in pending:
+            if t.get("due_date"):
+                for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+                    try:
+                        due = datetime.datetime.strptime(t["due_date"].strip(), fmt)
+                        if due < now:
+                            overdue_count += 1
+                        break
+                    except ValueError:
+                        continue
+
+        embed = discord.Embed(
+            title=f"📊 Workload Overview — {interaction.user.display_name}",
+            color=discord.Color.dark_purple()
+        )
+
+        # Priority gauge
+        total = len(pending)
+        high_pct = int(prio_counts["High"] / total * 100) if total else 0
+        med_pct = int(prio_counts["Medium"] / total * 100) if total else 0
+        low_pct = int(prio_counts["Low"] / total * 100) if total else 0
+
+        prio_bar = f"🔴 High: **{prio_counts['High']}** ({high_pct}%)\n🟡 Medium: **{prio_counts['Medium']}** ({med_pct}%)\n🟢 Low: **{prio_counts['Low']}** ({low_pct}%)"
+        embed.add_field(name="⚡ Priority Split", value=prio_bar, inline=True)
+
+        # Category breakdown
+        sorted_cats = sorted(cat_counts.items(), key=lambda x: x[1], reverse=True)[:6]
+        cat_lines = []
+        for cat, count in sorted_cats:
+            bar_len = min(count, 8)
+            bar = "█" * bar_len + "░" * (8 - bar_len)
+            cat_lines.append(f"`{bar}` **{count}** {cat}")
+        embed.add_field(name="📂 By Category", value="\n".join(cat_lines), inline=True)
+
+        # Summary
+        habits = len([t for t in pending if t.get("is_habit")])
+        embed.add_field(
+            name="📋 Summary",
+            value=f"**{total}** total pending\n**{overdue_count}** overdue ⚠️\n**{habits}** habits\n**{len(cat_counts)}** categories",
+            inline=False
+        )
+
+        # Workload assessment
+        if overdue_count > 5:
+            status = "🚨 **Heavy backlog!** Consider using `/task matrix` to prioritize."
+        elif total > 20:
+            status = "📈 **High workload.** Focus on High priority first."
+        elif total > 10:
+            status = "⚡ **Moderate.** You're managing well."
+        else:
+            status = "✅ **Light workload.** Great balance!"
+        embed.add_field(name="🔍 Assessment", value=status, inline=False)
+
+        await interaction.followup.send(embed=embed)
 
     # --- Helper Logic methods ---
 
