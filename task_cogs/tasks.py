@@ -935,13 +935,16 @@ class FocusGroup(app_commands.Group):
 # --- Tasks Cog Class ---
 
 class TasksCog(commands.Cog, name="Tasks"):
-
-    board_group = app_commands.Group(name="board", description="Board, sprint, and matrix views")
-    stats_group = app_commands.Group(name="stats", description="Task statistics and insights")
-    share_group = app_commands.Group(name="share", description="Share tasks with other users")
-    manage_group = app_commands.Group(name="manage", description="Task management utilities")
     """Cog managing all Task commands, checklists, focus, habits, and weekly graphs."""
-    __cog_app_commands_guilds__ = [int(os.getenv("GUILD_ID", "1514186381348306964"))]
+
+    # --- Parent Task Command Group ---
+    task_group = app_commands.Group(name="task", description="Valence Task Bot Commands")
+
+    # --- Sub-groups with parent=task_group ---
+    board_group = app_commands.Group(name="board", description="Board, sprint, and matrix views", parent=task_group)
+    stats_group = app_commands.Group(name="stats", description="Task statistics and insights", parent=task_group)
+    share_group = app_commands.Group(name="share", description="Share tasks with other users", parent=task_group)
+    manage_group = app_commands.Group(name="manage", description="Task management utilities", parent=task_group)
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -951,20 +954,12 @@ class TasksCog(commands.Cog, name="Tasks"):
         self.reminder_task.start()
         self.planner_alerts_task.start()
 
-        # Reload-safe dynamic nesting
+        # Reload-safe dynamic nesting for groups requiring self reference
         existing_names = [cmd.name for cmd in self.task_group.commands]
         if "checklist" not in existing_names:
             self.task_group.add_command(ChecklistGroup(self))
         if "focus" not in existing_names:
             self.task_group.add_command(FocusGroup(self))
-        if "board" not in existing_names:
-            self.task_group.add_command(self.board_group)
-        if "stats" not in existing_names:
-            self.task_group.add_command(self.stats_group)
-        if "share" not in existing_names:
-            self.task_group.add_command(self.share_group)
-        if "manage" not in existing_names:
-            self.task_group.add_command(self.manage_group)
 
     def cog_unload(self):
         self.habit_reset_loop.cancel()
@@ -980,9 +975,6 @@ class TasksCog(commands.Cog, name="Tasks"):
                     session.cancel()
             except Exception as e:
                 logger.error(f"[TASKS] Error cancelling focus session task: {e}")
-
-    # --- Parent Task Command Group ---
-    task_group = app_commands.Group(name="task", description="Valence Task Bot Commands")
 
     # Autocomplete handler
     async def task_id_autocomplete(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
