@@ -935,6 +935,11 @@ class FocusGroup(app_commands.Group):
 # --- Tasks Cog Class ---
 
 class TasksCog(commands.Cog, name="Tasks"):
+
+    board_group = app_commands.Group(name="board", description="Board, sprint, and matrix views")
+    stats_group = app_commands.Group(name="stats", description="Task statistics and insights")
+    share_group = app_commands.Group(name="share", description="Share tasks with other users")
+    manage_group = app_commands.Group(name="manage", description="Task management utilities")
     """Cog managing all Task commands, checklists, focus, habits, and weekly graphs."""
     __cog_app_commands_guilds__ = [int(os.getenv("GUILD_ID", "1514186381348306964"))]
 
@@ -952,6 +957,14 @@ class TasksCog(commands.Cog, name="Tasks"):
             self.task_group.add_command(ChecklistGroup(self))
         if "focus" not in existing_names:
             self.task_group.add_command(FocusGroup(self))
+        if "board" not in existing_names:
+            self.task_group.add_command(self.board_group)
+        if "stats" not in existing_names:
+            self.task_group.add_command(self.stats_group)
+        if "share" not in existing_names:
+            self.task_group.add_command(self.share_group)
+        if "manage" not in existing_names:
+            self.task_group.add_command(self.manage_group)
 
     def cog_unload(self):
         self.habit_reset_loop.cancel()
@@ -1535,7 +1548,7 @@ class TasksCog(commands.Cog, name="Tasks"):
         await interaction.response.send_message(embed=view.get_embed(), view=view, ephemeral=show_private)
 
     # 7. SHARE TASK
-    @task_group.command(name="share", description="Share a public task with another server user")
+    @share_group.command(name="add", description="Share a public task with another server user")
     @app_commands.describe(task_id="The UUID of the task", user="The user to collaborate with")
     @app_commands.autocomplete(task_id=task_id_autocomplete)
     async def task_share(self, interaction: discord.Interaction, task_id: str, user: discord.Member):
@@ -1566,7 +1579,7 @@ class TasksCog(commands.Cog, name="Tasks"):
     # Old Focus commands removed (now nested under /task focus start/cancel)
 
     # 9. DASHBOARD
-    @task_group.command(name="dashboard", description="View your productivity level, streaks, and agenda")
+    @stats_group.command(name="dashboard", description="View your productivity level, streaks, and agenda")
     async def task_dashboard(self, interaction: discord.Interaction):
         await interaction.response.defer()
         user_id_str = str(interaction.user.id)
@@ -1610,7 +1623,7 @@ class TasksCog(commands.Cog, name="Tasks"):
         await interaction.followup.send(embed=embed)
 
     # 10. WEEKLY TASK BOARD (task-focused, NOT XP-based like YPT)
-    @task_group.command(name="board", description="Weekly task completion board — who shipped the most this week")
+    @board_group.command(name="show", description="Weekly task completion board — who shipped the most this week")
     async def task_board(self, interaction: discord.Interaction):
         await interaction.response.defer()
         leaderboard = await asyncio.to_thread(task_db.get_leaderboard)
@@ -1659,7 +1672,7 @@ class TasksCog(commands.Cog, name="Tasks"):
         await interaction.followup.send(embed=embed)
 
     # 11. WEEKLY PRODUCTIVITY GRAPH
-    @task_group.command(name="graph", description="Show a visual trend chart of your weekly task completions")
+    @stats_group.command(name="graph", description="Show a visual trend chart of your weekly task completions")
     async def task_graph(self, interaction: discord.Interaction):
         await interaction.response.defer()
         
@@ -1710,7 +1723,7 @@ class TasksCog(commands.Cog, name="Tasks"):
         await interaction.response.send_message(embed=embed)
 
     # 13. CUSTOM REMINDERS
-    @task_group.command(name="remind", description="Schedule a custom DM reminder for a task")
+    @manage_group.command(name="remind", description="Schedule a custom DM reminder for a task")
     @app_commands.describe(
         task_id="The UUID of the task",
         time="Time to remind (e.g. '10m', '2h', 'tomorrow', '15:30', or 'YYYY-MM-DD HH:MM')"
@@ -1854,33 +1867,6 @@ class TasksCog(commands.Cog, name="Tasks"):
         embed.set_footer(text=f"Total: {len(today_tasks)} items • Use /task view to manage")
         await interaction.followup.send(embed=embed)
 
-    # 16. OVERDUE VIEW
-    @task_group.command(name="overdue", description="List all overdue pending tasks")
-    async def task_overdue(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        user_id_str = str(interaction.user.id)
-        overdue_tasks = await asyncio.to_thread(task_db.get_overdue_tasks, user_id_str)
-
-        if not overdue_tasks:
-            await interaction.followup.send("✅ No overdue tasks! You're on track.", ephemeral=True)
-            return
-
-        embed = discord.Embed(
-            title=f"⚠️ Overdue Tasks ({len(overdue_tasks)})",
-            color=discord.Color.red()
-        )
-        lines = []
-        now = task_db.get_ist_now()
-        for t in overdue_tasks[:15]:
-            due = t.get("due_date", "")
-            prio = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}.get(t.get("priority"), "🟡")
-            lines.append(f"{prio} **{t['title']}** — Due: `{due}` | ID: `{t['task_id'][:8]}`")
-
-        embed.description = "\n".join(lines)
-        if len(overdue_tasks) > 15:
-            embed.set_footer(text=f"Showing 15 of {len(overdue_tasks)} overdue tasks")
-        await interaction.followup.send(embed=embed)
-
     # 17. SEARCH
     @task_group.command(name="search", description="Search your tasks by keyword")
     @app_commands.describe(query="Search keyword to match against task titles and descriptions")
@@ -1908,7 +1894,7 @@ class TasksCog(commands.Cog, name="Tasks"):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     # 18. UNSHARE
-    @task_group.command(name="unshare", description="Remove a user from a shared task")
+    @share_group.command(name="remove", description="Remove a user from a shared task")
     @app_commands.describe(task_id="The UUID of the task", user="The user to remove")
     @app_commands.autocomplete(task_id=task_id_autocomplete)
     async def task_unshare(self, interaction: discord.Interaction, task_id: str, user: discord.Member):
@@ -2000,7 +1986,7 @@ class TasksCog(commands.Cog, name="Tasks"):
             await interaction.response.send_message("❌ Failed to add note.", ephemeral=True)
 
     # 21. STATS
-    @task_group.command(name="stats", description="View your detailed productivity statistics")
+    @stats_group.command(name="show", description="View your detailed productivity statistics")
     async def task_stats(self, interaction: discord.Interaction):
         await interaction.response.defer()
         user_id_str = str(interaction.user.id)
@@ -2067,7 +2053,7 @@ class TasksCog(commands.Cog, name="Tasks"):
         await interaction.followup.send(embed=embed)
 
     # 22. STREAK FREEZE
-    @task_group.command(name="freeze", description="Use a streak freeze to protect your streak for today")
+    @manage_group.command(name="freeze", description="Use a streak freeze to protect your streak for today")
     async def task_freeze(self, interaction: discord.Interaction):
         user_id_str = str(interaction.user.id)
         profile = await asyncio.to_thread(task_db.get_user_profile, user_id_str)
@@ -2096,7 +2082,7 @@ class TasksCog(commands.Cog, name="Tasks"):
             await interaction.response.send_message("❌ Failed to use streak freeze.", ephemeral=True)
 
     # 23. WHO'S FOCUSING
-    @task_group.command(name="whofocusing", description="See who's currently in a focus session")
+    @board_group.command(name="whofocusing", description="See who's currently in a focus session")
     async def task_whofocusing(self, interaction: discord.Interaction):
         sessions = self.active_focus_sessions
         if not sessions:
@@ -2135,7 +2121,7 @@ class TasksCog(commands.Cog, name="Tasks"):
         await interaction.response.send_message(embed=embed)
 
     # 24. KANBAN BOARD VIEW
-    @task_group.command(name="kanban", description="Visual Kanban board — see all tasks by status")
+    @board_group.command(name="kanban", description="Visual Kanban board — see all tasks by status")
     async def task_kanban(self, interaction: discord.Interaction):
         await interaction.response.defer()
         user_id_str = str(interaction.user.id)
@@ -2205,7 +2191,7 @@ class TasksCog(commands.Cog, name="Tasks"):
         await interaction.followup.send(embed=embed)
 
     # 25-A. SPRINT GOAL
-    @task_group.command(name="sprint", description="Set or view your weekly task completion goal")
+    @board_group.command(name="sprint", description="Set or view your weekly task completion goal")
     @app_commands.describe(target="Set a weekly goal (e.g. 10 tasks). Omit to view current progress.")
     async def task_sprint(self, interaction: discord.Interaction, target: int = None):
         user_id_str = str(interaction.user.id)
@@ -2265,7 +2251,7 @@ class TasksCog(commands.Cog, name="Tasks"):
         await interaction.response.send_message(embed=embed)
 
     # 25-B. EISENHOWER PRIORITY MATRIX
-    @task_group.command(name="matrix", description="Eisenhower matrix — see tasks by urgency vs importance")
+    @board_group.command(name="matrix", description="Eisenhower matrix — see tasks by urgency vs importance")
     async def task_matrix(self, interaction: discord.Interaction):
         await interaction.response.defer()
         user_id_str = str(interaction.user.id)
@@ -2326,7 +2312,7 @@ class TasksCog(commands.Cog, name="Tasks"):
         await interaction.followup.send(embed=embed)
 
     # 25. EXPORT
-    @task_group.command(name="export", description="Export your tasks as a CSV file")
+    @manage_group.command(name="export", description="Export your tasks as a CSV file")
     @app_commands.describe(status="Filter by status (or export all)")
     @app_commands.choices(
         status=[
@@ -2367,7 +2353,7 @@ class TasksCog(commands.Cog, name="Tasks"):
         await interaction.followup.send(embed=embed, file=file, ephemeral=True)
 
     # 26. BADGES VIEWER
-    @task_group.command(name="badges", description="View your earned achievement badges")
+    @stats_group.command(name="badges", description="View your earned achievement badges")
     async def task_badges(self, interaction: discord.Interaction):
         user_id_str = str(interaction.user.id)
         try:
@@ -2617,7 +2603,7 @@ class TasksCog(commands.Cog, name="Tasks"):
         )
 
     # 32. WORKLOAD
-    @task_group.command(name="workload", description="Visualize your task distribution by category and priority")
+    @stats_group.command(name="workload", description="Visualize your task distribution by category and priority")
     async def task_workload(self, interaction: discord.Interaction):
         await interaction.response.defer()
         user_id_str = str(interaction.user.id)
@@ -2698,44 +2684,6 @@ class TasksCog(commands.Cog, name="Tasks"):
 
         await interaction.followup.send(embed=embed)
 
-    # 33. CLONE TASK
-    @task_group.command(name="clone", description="Duplicate a task with all its details")
-    @app_commands.describe(task_id="The UUID of the task to clone")
-    @app_commands.autocomplete(task_id=task_id_autocomplete)
-    async def task_clone(self, interaction: discord.Interaction, task_id: str):
-        task = await asyncio.to_thread(task_db.get_task, task_id)
-        if not task:
-            await interaction.response.send_message("❌ Task not found.", ephemeral=True)
-            return
-        if task.get("user_id") != str(interaction.user.id):
-            await interaction.response.send_message("❌ You are not the owner of this task.", ephemeral=True)
-            return
-
-        # Clone with fresh state
-        new_id = await asyncio.to_thread(
-            task_db.add_task,
-            user_id=str(interaction.user.id),
-            title=f"{task.get('title', 'Untitled')} (copy)",
-            description=task.get("description"),
-            due_date=task.get("due_date"),
-            priority=task.get("priority", "Medium"),
-            category=task.get("category", "General"),
-            is_private=task.get("is_private", False),
-            recurrence=task.get("recurrence"),
-            is_habit=task.get("is_habit", False),
-            pomodoros_estimated=task.get("pomodoros_estimated", 1)
-        )
-
-        embed = discord.Embed(
-            title="📋 Task Cloned!",
-            description=f"**{task.get('title')}** → **{task.get('title')} (copy)**",
-            color=discord.Color.green()
-        )
-        embed.add_field(name="New ID", value=f"`{new_id[:8]}`", inline=True)
-        embed.add_field(name="Status", value="⏳ Pending (fresh start)", inline=True)
-        embed.set_footer(text="Edit the clone with /task edit if needed")
-        await interaction.response.send_message(embed=embed, ephemeral=task.get("is_private"))
-
     # 34. OVERDUE TASKS
     @task_group.command(name="overdue", description="List all your overdue tasks")
     async def task_overdue(self, interaction: discord.Interaction):
@@ -2791,7 +2739,7 @@ class TasksCog(commands.Cog, name="Tasks"):
         await interaction.followup.send(embed=embed)
 
     # 35. CLEANUP OLD COMPLETED TASKS
-    @task_group.command(name="cleanup", description="Delete all completed tasks older than N days")
+    @manage_group.command(name="cleanup", description="Delete all completed tasks older than N days")
     @app_commands.describe(days="Delete completed tasks older than this many days (default: 30)")
     async def task_cleanup(self, interaction: discord.Interaction, days: int = 30):
         if days < 1:
