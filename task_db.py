@@ -198,34 +198,35 @@ def get_user_profile(user_id: str) -> dict:
             raise e
             
     # SQLite Fallback
-    conn = sqlite3.connect(SQLITE_DB_PATH)
-    try:
-        conn.execute("PRAGMA journal_mode=WAL;")
-        cursor = conn.cursor()
-        cursor.execute("SELECT xp, level, streak, last_completed_date, total_completed, best_streak, streak_freezes, badges, sprint_goal FROM users WHERE user_id = ?", (user_id,))
-        row = cursor.fetchone()
-        if row:
-            return {
-                "user_id": user_id,
-                "xp": row[0],
-                "level": row[1],
-                "streak": row[2],
-                "last_completed_date": row[3],
-                "total_completed": row[4],
-                "best_streak": row[5] if row[5] is not None else 0,
-                "streak_freezes": row[6] if row[6] is not None else 1,
-                "badges": row[7] if row[7] is not None else "[]",
-                "sprint_goal": row[8] if row[8] is not None else 7
-            }
-        else:
-            cursor.execute(
-                "INSERT INTO users (user_id, xp, level, streak, last_completed_date, total_completed, best_streak, streak_freezes, badges, sprint_goal) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (user_id, 0, 1, 0, None, 0, 0, 1, "[]", 7)
-            )
-            conn.commit()
-            return default_profile
-    finally:
-        conn.close()
+    with db_lock:
+        conn = sqlite3.connect(SQLITE_DB_PATH)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            cursor = conn.cursor()
+            cursor.execute("SELECT xp, level, streak, last_completed_date, total_completed, best_streak, streak_freezes, badges, sprint_goal FROM users WHERE user_id = ?", (user_id,))
+            row = cursor.fetchone()
+            if row:
+                return {
+                    "user_id": user_id,
+                    "xp": row[0],
+                    "level": row[1],
+                    "streak": row[2],
+                    "last_completed_date": row[3],
+                    "total_completed": row[4],
+                    "best_streak": row[5] if row[5] is not None else 0,
+                    "streak_freezes": row[6] if row[6] is not None else 1,
+                    "badges": row[7] if row[7] is not None else "[]",
+                    "sprint_goal": row[8] if row[8] is not None else 7
+                }
+            else:
+                cursor.execute(
+                    "INSERT INTO users (user_id, xp, level, streak, last_completed_date, total_completed, best_streak, streak_freezes, badges, sprint_goal) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (user_id, 0, 1, 0, None, 0, 0, 1, "[]", 7)
+                )
+                conn.commit()
+                return default_profile
+        finally:
+            conn.close()
 
 def update_user_profile(user_id: str, updates: dict) -> bool:
     """Updates fields on a user's profile."""
@@ -694,15 +695,16 @@ def get_last_habit_reset_date() -> str:
             logger.error(f"Firestore get_last_habit_reset_date error: {e}", exc_info=True)
             raise
     # SQLite
-    conn = sqlite3.connect(SQLITE_DB_PATH)
-    try:
-        cursor = conn.cursor()
-        cursor.execute("CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)")
-        cursor.execute("SELECT value FROM config WHERE key = 'last_habit_reset_date'")
-        row = cursor.fetchone()
-        return row[0] if row else None
-    finally:
-        conn.close()
+    with db_lock:
+        conn = sqlite3.connect(SQLITE_DB_PATH)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)")
+            cursor.execute("SELECT value FROM config WHERE key = 'last_habit_reset_date'")
+            row = cursor.fetchone()
+            return row[0] if row else None
+        finally:
+            conn.close()
 
 def set_last_habit_reset_date(date_str: str):
     """Sets the last date habit resets were executed."""
@@ -714,14 +716,15 @@ def set_last_habit_reset_date(date_str: str):
             logger.error(f"Firestore set_last_habit_reset_date error: {e}", exc_info=True)
             raise
     # SQLite
-    conn = sqlite3.connect(SQLITE_DB_PATH)
-    try:
-        cursor = conn.cursor()
-        cursor.execute("CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)")
-        cursor.execute("INSERT OR REPLACE INTO config (key, value) VALUES ('last_habit_reset_date', ?)", (date_str,))
-        conn.commit()
-    finally:
-        conn.close()
+    with db_lock:
+        conn = sqlite3.connect(SQLITE_DB_PATH)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)")
+            cursor.execute("INSERT OR REPLACE INTO config (key, value) VALUES ('last_habit_reset_date', ?)", (date_str,))
+            conn.commit()
+        finally:
+            conn.close()
 
 # --- New DB Functions ---
 

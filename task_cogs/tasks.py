@@ -2760,7 +2760,7 @@ class TasksCog(commands.Cog, name="Tasks"):
         deleted_count = 0
         for t in to_delete:
             try:
-                await asyncio.to_thread(task_db.delete_task, str(interaction.user.id), t["task_id"])
+                await asyncio.to_thread(task_db.delete_task, t["task_id"])
                 deleted_count += 1
             except Exception:
                 pass
