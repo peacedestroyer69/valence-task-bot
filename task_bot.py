@@ -93,6 +93,7 @@ async def setup_hook():
         target_guild = discord.Object(id=guild_id)
         
         # Sync command tree to target guild
+        bot.tree.copy_global_to(guild=target_guild)
         synced = await bot.tree.sync(guild=target_guild)
         logger.info(f"Successfully synced {len(synced)} command(s) to target guild (ID: {guild_id})")
         
