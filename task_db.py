@@ -5,6 +5,10 @@ import datetime
 import sqlite3
 import firebase_admin
 from firebase_admin import credentials, firestore
+try:
+    from google.cloud.firestore_v1.base_query import FieldFilter
+except ImportError:
+    FieldFilter = None
 from dotenv import load_dotenv
 import threading
 
@@ -98,6 +102,10 @@ def init_local_db():
         """)
         # Upgrade existing SQLite DB if columns are missing
         _migrate_columns = [
+            ("tasks", "pomodoros_estimated", "INTEGER DEFAULT 0"),
+            ("tasks", "pomodoros_completed", "INTEGER DEFAULT 0"),
+            ("tasks", "recurrence", "TEXT DEFAULT ''"),
+            ("tasks", "is_habit", "INTEGER DEFAULT 0"),
             ("tasks", "due_warning_sent", "INTEGER DEFAULT 0"),
             ("tasks", "remind_at", "TEXT"),
             ("tasks", "notes", "TEXT DEFAULT '[]'"),
@@ -428,11 +436,11 @@ def get_user_tasks(user_id: str, status: str = None, category: str = None, prior
     if not use_sqlite and db:
         try:
             tasks_ref = db.collection("task_bot_tasks")
-            query = tasks_ref.where("user_id", "==", user_id)
+            query = tasks_ref.where(filter=FieldFilter("user_id", "==", user_id))
             docs = query.stream()
             tasks = [doc.to_dict() for doc in docs]
             
-            shared_query = tasks_ref.where("shared_with", "array_contains", user_id)
+            shared_query = tasks_ref.where(filter=FieldFilter("shared_with", "array_contains", user_id))
             shared_docs = shared_query.stream()
             for doc in shared_docs:
                 t = doc.to_dict()
@@ -457,7 +465,7 @@ def get_user_tasks(user_id: str, status: str = None, category: str = None, prior
     conn = sqlite3.connect(SQLITE_DB_PATH)
     try:
         cursor = conn.cursor()
-        query = "SELECT * FROM tasks WHERE user_id = ? OR shared_with LIKE ?"
+        query = "SELECT * FROM tasks WHERE (user_id = ? OR shared_with LIKE ?)"
         params = [user_id, f'%"{user_id}"%']
         if status:
             query += " AND status = ?"
@@ -480,7 +488,7 @@ def get_all_pending_tasks() -> list:
     """Retrieves all pending tasks across all users (for reminders)."""
     if not use_sqlite and db:
         try:
-            docs = db.collection("task_bot_tasks").where("status", "==", "pending").stream()
+            docs = db.collection("task_bot_tasks").where(filter=FieldFilter("status", "==", "pending")).stream()
             return [doc.to_dict() for doc in docs]
         except Exception as e:
             logger.error(f"Firestore get_all_pending_tasks error: {e}")
@@ -659,8 +667,8 @@ def fetch_completed_habits() -> list:
     if not use_sqlite and db:
         try:
             docs = db.collection("task_bot_tasks") \
-                     .where("is_habit", "==", True) \
-                     .where("status", "==", "completed") \
+                     .where(filter=FieldFilter("is_habit", "==", True)) \
+                     .where(filter=FieldFilter("status", "==", "completed")) \
                      .stream()
             return [doc.to_dict() for doc in docs]
         except Exception as e:
@@ -731,12 +739,52 @@ def set_last_habit_reset_date(date_str: str):
 def reopen_task(task_id: str) -> bool:
     """Sets a completed task back to pending, clears completed_at."""
     task_id = str(task_id)
-    task = get_task(task_id)
-    if not task:
-        return False
-    if task.get("status") != "completed":
-        return False
-    return update_task(task_id, {"status": "pending", "completed_at": None})
+    with db_lock:
+        task = get_task(task_id)
+        if not task:
+            return False
+        if task.get("status") != "completed":
+            return False
+            
+        user_id = str(task.get("user_id"))
+        priority = task.get("priority", "Medium")
+        base_xp = 100
+        if priority == "High":
+            base_xp = 150
+        elif priority == "Low":
+            base_xp = 50
+            
+        checklist = task.get("checklist", [])
+        checklist_bonus = 0
+        if checklist:
+            checklist_bonus = sum(10 for item in checklist if item.get("done") or item.get("completed"))
+            
+        total_xp = base_xp + checklist_bonus
+        
+        profile = get_user_profile(user_id)
+        current_xp = max(0, profile.get("xp", 0) - total_xp)
+        current_total = max(0, profile.get("total_completed", 0) - 1)
+        
+        updates = {
+            "xp": current_xp,
+            "total_completed": current_total
+        }
+        
+        today_str = get_ist_date_str()
+        if profile.get("last_completed_date") == today_str:
+            if use_sqlite:
+                conn = sqlite3.connect(SQLITE_DB_PATH)
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT COUNT(*) FROM tasks WHERE user_id = ? AND completed_at LIKE ?", (user_id, today_str + "%"))
+                    count = cursor.fetchone()[0]
+                    if count <= 1:
+                        updates["streak"] = max(0, profile.get("streak", 0) - 1)
+                finally:
+                    conn.close()
+            
+        update_user_profile(user_id, updates)
+        return update_task(task_id, {"status": "pending", "completed_at": None})
 
 def get_overdue_tasks(user_id: str) -> list:
     """Gets all pending tasks where due_date < now (IST)."""
@@ -746,8 +794,8 @@ def get_overdue_tasks(user_id: str) -> list:
     if not use_sqlite and db:
         try:
             tasks_ref = db.collection("task_bot_tasks")
-            docs = tasks_ref.where("user_id", "==", user_id) \
-                            .where("status", "==", "pending") \
+            docs = tasks_ref.where(filter=FieldFilter("user_id", "==", user_id)) \
+                            .where(filter=FieldFilter("status", "==", "pending")) \
                             .stream()
             overdue = []
             for doc in docs:
@@ -782,8 +830,8 @@ def get_today_tasks(user_id: str) -> list:
     if not use_sqlite and db:
         try:
             tasks_ref = db.collection("task_bot_tasks")
-            docs = tasks_ref.where("user_id", "==", user_id) \
-                            .where("status", "==", "pending") \
+            docs = tasks_ref.where(filter=FieldFilter("user_id", "==", user_id)) \
+                            .where(filter=FieldFilter("status", "==", "pending")) \
                             .stream()
             result = []
             for doc in docs:
