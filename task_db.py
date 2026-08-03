@@ -20,6 +20,25 @@ db = None
 use_sqlite = True
 db_lock = threading.RLock()
 
+# --- In-Memory Caching & Dirty Tracking ---
+_TASK_USER_CACHE: dict = {}
+_TASK_CACHE: dict = {}
+_DIRTY_TASK_USERS: set = set()
+_DIRTY_TASKS: set = set()
+_DELETED_TASKS: set = set()
+
+def _record_task_db_op(op_type: str, count: int = 1):
+    """Record database operations for Task Bot metrics."""
+    try:
+        import sys
+        # If bot.py's _record_db_op is available in system modules, call it
+        for mod in sys.modules.values():
+            if hasattr(mod, "_record_db_op") and callable(mod._record_db_op):
+                mod._record_db_op(op_type, bot_name="task_bot", count=count)
+                break
+    except Exception:
+        pass
+
 # --- Column Whitelists (SQL injection prevention) ---
 ALLOWED_USER_FIELDS = {"xp", "level", "streak", "last_completed_date", "total_completed", "best_streak", "streak_freezes", "badges", "sprint_goal"}
 ALLOWED_TASK_FIELDS = {"title", "description", "due_date", "priority", "category", "is_private", "status", "completed_at", "shared_with", "checklist", "pomodoros_estimated", "pomodoros_completed", "recurrence", "is_habit", "due_warning_sent", "remind_at", "notes"}
@@ -175,8 +194,11 @@ def _row_to_task_dict(row) -> dict:
 # --- User Profile Operations ---
 
 def get_user_profile(user_id: str) -> dict:
-    """Gets or creates a user profile."""
+    """Gets or creates a user profile using cache-first strategy."""
     user_id = str(user_id)
+    if user_id in _TASK_USER_CACHE:
+        return _TASK_USER_CACHE[user_id]
+
     default_profile = {
         "user_id": user_id,
         "xp": 0,
@@ -194,16 +216,22 @@ def get_user_profile(user_id: str) -> dict:
         try:
             doc_ref = db.collection("task_bot_users").document(user_id)
             doc = doc_ref.get()
+            _record_task_db_op("read", count=1)
             if doc.exists:
                 data = doc.to_dict()
                 data["user_id"] = user_id
+                _TASK_USER_CACHE[user_id] = data
                 return data
             else:
                 doc_ref.set(default_profile)
+                _record_task_db_op("write", count=1)
+                _TASK_USER_CACHE[user_id] = default_profile
                 return default_profile
         except Exception as e:
             logger.error(f"Firestore get_user_profile error: {e}")
-            raise e
+            # Fall back to default profile if Firestore fails
+            _TASK_USER_CACHE[user_id] = default_profile
+            return default_profile
             
     # SQLite Fallback
     with db_lock:
@@ -214,7 +242,7 @@ def get_user_profile(user_id: str) -> dict:
             cursor.execute("SELECT xp, level, streak, last_completed_date, total_completed, best_streak, streak_freezes, badges, sprint_goal FROM users WHERE user_id = ?", (user_id,))
             row = cursor.fetchone()
             if row:
-                return {
+                profile = {
                     "user_id": user_id,
                     "xp": row[0],
                     "level": row[1],
@@ -226,18 +254,21 @@ def get_user_profile(user_id: str) -> dict:
                     "badges": row[7] if row[7] is not None else "[]",
                     "sprint_goal": row[8] if row[8] is not None else 7
                 }
+                _TASK_USER_CACHE[user_id] = profile
+                return profile
             else:
                 cursor.execute(
                     "INSERT INTO users (user_id, xp, level, streak, last_completed_date, total_completed, best_streak, streak_freezes, badges, sprint_goal) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (user_id, 0, 1, 0, None, 0, 0, 1, "[]", 7)
                 )
                 conn.commit()
+                _TASK_USER_CACHE[user_id] = default_profile
                 return default_profile
         finally:
             conn.close()
 
 def update_user_profile(user_id: str, updates: dict) -> bool:
-    """Updates fields on a user's profile."""
+    """Updates fields on a user's profile with memory cache & dirty tracking."""
     user_id = str(user_id)
 
     # Validate keys against whitelist
@@ -248,12 +279,21 @@ def update_user_profile(user_id: str, updates: dict) -> bool:
     if not updates:
         return False
 
+    # Update in-memory cache instantly
+    profile = _TASK_USER_CACHE.get(user_id) or get_user_profile(user_id)
+    profile.update(updates)
+    _TASK_USER_CACHE[user_id] = profile
+    _DIRTY_TASK_USERS.add(user_id)
+
     with db_lock:
         if not use_sqlite and db:
             try:
                 db.collection("task_bot_users").document(user_id).update(updates)
+                _record_task_db_op("write", count=1)
                 return True
             except Exception as e:
+                logger.error(f"Firestore update_user_profile error: {e}")
+                return True  # Retain in cache even if network call fails
                 logger.error(f"Firestore update_user_profile error: {e}")
                 raise e
                 
