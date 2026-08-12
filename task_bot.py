@@ -121,13 +121,6 @@ async def global_task_bot_lockout_check(interaction: discord.Interaction) -> boo
     if not user:
         return True
 
-    if user.id in (VALENCE_ID, UJJWAL_ID):
-        return True
-
-    if interaction.guild:
-        if user.id == interaction.guild.owner_id or getattr(interaction.permissions, "administrator", False):
-            return True
-
     # Check Discord Roles ("Locked Out", "Quarantined", "Unverified")
     roles = getattr(user, "roles", [])
     has_lockout_role = any(r.name in ("Locked Out", "Quarantined", "Unverified") for r in roles)
