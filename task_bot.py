@@ -100,6 +100,75 @@ async def setup_hook():
         logger.error(f"Error during slash command synchronization in setup_hook: {e}", exc_info=True)
 
 
+VALENCE_ID = 1149959648938954752
+UJJWAL_ID = 988358245595201536
+
+from discord import app_commands
+
+@bot.tree.interaction_check
+async def global_task_bot_lockout_check(interaction: discord.Interaction) -> bool:
+    """Block all slash commands for quarantined/locked-out users except /verify."""
+    if not interaction.command:
+        return True
+
+    cmd_name = interaction.command.name.lower()
+    qual_name = interaction.command.qualified_name.lower()
+
+    if cmd_name == "verify" or qual_name.startswith("verify") or "admin_override" in qual_name:
+        return True
+
+    user = interaction.user
+    if not user:
+        return True
+
+    if user.id in (VALENCE_ID, UJJWAL_ID):
+        return True
+
+    if interaction.guild:
+        if user.id == interaction.guild.owner_id or getattr(interaction.permissions, "administrator", False):
+            return True
+
+    # Check Discord Roles ("Locked Out", "Quarantined", "Unverified")
+    roles = getattr(user, "roles", [])
+    has_lockout_role = any(r.name in ("Locked Out", "Quarantined", "Unverified") for r in roles)
+
+    # Check database/task_db or study bot DB fallback
+    is_quarantined_db = False
+    try:
+        from task_db import load_study_data
+        data = await load_study_data()
+        uid = str(user.id)
+        udata = data.get("users", {}).get(uid, {})
+        is_quarantined_db = udata.get("quarantined", False)
+    except Exception as e:
+        logger.warning(f"Task bot lockout DB check error: {e}")
+
+    if is_quarantined_db or has_lockout_role:
+        if not interaction.response.is_done():
+            try:
+                await interaction.response.send_message(
+                    "🔒 You are currently **locked out**. Use `/verify` to solve puzzles and regain access.",
+                    ephemeral=True,
+                )
+            except Exception:
+                pass
+        return False
+
+    return True
+
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.CheckFailure):
+        return
+    logger.error(f"Task Bot App command error: {error}", exc_info=True)
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.send_message("⚠️ An error occurred while executing this command.", ephemeral=True)
+    except Exception:
+        pass
+
+
 @bot.event
 async def on_ready():
     """Triggers when the bot client is ready."""
