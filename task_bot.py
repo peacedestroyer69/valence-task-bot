@@ -29,18 +29,57 @@ def apply_global_gateway_lockout(bot: commands.Bot, locked_role_id: int = 153463
     """Patches bot.dispatch to drop messages/interactions from locked-out users at gateway level."""
     original_dispatch = bot.dispatch
 
-    def check_locked(user):
+    def check_locked(user, raw_interaction_data=None):
         if not user:
             return False
+
+        # 1. Check raw member._roles set (bypasses g.get_role cache miss)
+        raw_roles = getattr(user, "_roles", set())
+        for r_id in raw_roles:
+            if r_id == locked_role_id or str(r_id) == "1534636469443100692":
+                return True
+
+        # 2. Check raw interaction member roles payload from Gateway
+        if raw_interaction_data and isinstance(raw_interaction_data, dict):
+            member_data = raw_interaction_data.get("member", {})
+            if isinstance(member_data, dict):
+                payload_roles = member_data.get("roles", [])
+                for r_id in payload_roles:
+                    if str(r_id) == "1534636469443100692" or r_id == locked_role_id:
+                        return True
+
+        # 3. Check role objects
         if hasattr(user, "roles"):
             for role in user.roles:
-                if role.id == locked_role_id or str(role.id) == "1534636469443100692" or role.name in {"Locked Out", "Quarantined", "Unverified"}:
+                r_name = role.name.lower()
+                if (
+                    role.id == locked_role_id
+                    or str(role.id) == "1534636469443100692"
+                    or "locked out" in r_name
+                    or "quarantine" in r_name
+                    or "unverified" in r_name
+                ):
                     return True
-        elif isinstance(user, (discord.User, discord.Member)):
+
+        # 4. DM / discord.User fallback across all bot guilds
+        if isinstance(user, (discord.User, discord.Member)):
             for guild in bot.guilds:
-                member = guild.get_member(user.id)
-                if member and any(role.id == locked_role_id or str(role.id) == "1534636469443100692" or role.name in {"Locked Out", "Quarantined", "Unverified"} for role in member.roles):
-                    return True
+                m = guild.get_member(user.id)
+                if m:
+                    m_raw = getattr(m, "_roles", set())
+                    for r_id in m_raw:
+                        if r_id == locked_role_id or str(r_id) == "1534636469443100692":
+                            return True
+                    for role in getattr(m, "roles", []):
+                        r_name = role.name.lower()
+                        if (
+                            role.id == locked_role_id
+                            or str(role.id) == "1534636469443100692"
+                            or "locked out" in r_name
+                            or "quarantine" in r_name
+                            or "unverified" in r_name
+                        ):
+                            return True
         return False
 
     def patched_dispatch(event_name, /, *args, **kwargs):
@@ -53,24 +92,26 @@ def apply_global_gateway_lockout(bot: commands.Bot, locked_role_id: int = 153463
 
         elif event_name == "interaction" and args:
             interaction = args[0]
+            raw_data = getattr(interaction, "data", None)
+
             cmd_name = ""
             qual_name = ""
             if getattr(interaction, "command", None):
                 cmd_name = getattr(interaction.command, "name", "").lower()
                 qual_name = getattr(interaction.command, "qualified_name", "").lower()
-            elif getattr(interaction, "data", None) and isinstance(interaction.data, dict):
-                cmd_name = str(interaction.data.get("name", "")).lower()
+            elif raw_data and isinstance(raw_data, dict):
+                cmd_name = str(raw_data.get("name", "")).lower()
                 qual_name = cmd_name
 
             custom_id = ""
-            if getattr(interaction, "data", None) and isinstance(interaction.data, dict):
-                custom_id = str(interaction.data.get("custom_id", ""))
+            if raw_data and isinstance(raw_data, dict):
+                custom_id = str(raw_data.get("custom_id", ""))
 
             if cmd_name == "verify" or qual_name.startswith("verify") or custom_id.startswith("verify_") or "admin_override" in qual_name:
                 return original_dispatch(event_name, *args, **kwargs)
 
             user = getattr(interaction, "user", None)
-            if check_locked(user):
+            if check_locked(user, raw_data):
                 async def send_lockout():
                     try:
                         if not interaction.response.is_done():
