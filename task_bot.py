@@ -108,12 +108,16 @@ LOCKOUT_ROLE_NAMES = {"Locked Out", "Quarantined", "Unverified"}
 from discord import app_commands
 
 
-def is_user_locked_out(user: discord.User | discord.Member, udata: dict = None) -> bool:
+def is_user_locked_out(user: discord.User | discord.Member, udata: dict = None, guild: discord.Guild = None) -> bool:
     """Returns True if the user has Role ID 1534636469443100692, any lockout role name, or quarantined=True in DB."""
     if not user:
         return False
 
-    roles = getattr(user, "roles", [])
+    member = user
+    if guild and not isinstance(user, discord.Member):
+        member = guild.get_member(user.id) or user
+
+    roles = getattr(member, "roles", [])
     for r in roles:
         if r.id == LOCKOUT_ROLE_ID or str(r.id) == "1534636469443100692" or r.name in LOCKOUT_ROLE_NAMES:
             return True
@@ -150,7 +154,7 @@ async def global_task_bot_lockout_check(interaction: discord.Interaction) -> boo
     except Exception as e:
         logger.warning(f"Task bot lockout DB check error: {e}")
 
-    if is_user_locked_out(user, udata):
+    if is_user_locked_out(user, udata, guild=interaction.guild):
         if not interaction.response.is_done():
             try:
                 await interaction.response.send_message(
@@ -162,6 +166,35 @@ async def global_task_bot_lockout_check(interaction: discord.Interaction) -> boo
         return False
 
     return True
+
+
+@bot.event
+async def on_interaction(interaction: discord.Interaction):
+    """Global interaction handler blocking non-verify button/component clicks on Task Bot for locked-out users."""
+    if interaction.type == discord.InteractionType.component:
+        user = interaction.user
+        if user:
+            custom_id = (interaction.data.get("custom_id") or "") if interaction.data else ""
+            if not custom_id.startswith("verify_"):
+                udata = {}
+                try:
+                    from task_db import load_study_data
+                    data = await load_study_data()
+                    uid = str(user.id)
+                    udata = data.get("users", {}).get(uid, {})
+                except Exception:
+                    pass
+
+                if is_user_locked_out(user, udata, guild=interaction.guild):
+                    if not interaction.response.is_done():
+                        try:
+                            await interaction.response.send_message(
+                                "🔒 You are currently **locked out**. Use `/verify` to solve puzzles and regain access.",
+                                ephemeral=True,
+                            )
+                        except Exception:
+                            pass
+                    return
 
 
 @bot.tree.error
