@@ -53,9 +53,18 @@ def apply_global_gateway_lockout(bot: commands.Bot, locked_role_id: int = 153463
 
         elif event_name == "interaction" and args:
             interaction = args[0]
-            cmd_name = getattr(getattr(interaction, "command", None), "name", "").lower()
-            qual_name = getattr(getattr(interaction, "command", None), "qualified_name", "").lower()
-            custom_id = (interaction.data.get("custom_id") or "") if getattr(interaction, "data", None) else ""
+            cmd_name = ""
+            qual_name = ""
+            if getattr(interaction, "command", None):
+                cmd_name = getattr(interaction.command, "name", "").lower()
+                qual_name = getattr(interaction.command, "qualified_name", "").lower()
+            elif getattr(interaction, "data", None) and isinstance(interaction.data, dict):
+                cmd_name = str(interaction.data.get("name", "")).lower()
+                qual_name = cmd_name
+
+            custom_id = ""
+            if getattr(interaction, "data", None) and isinstance(interaction.data, dict):
+                custom_id = str(interaction.data.get("custom_id", ""))
 
             if cmd_name == "verify" or qual_name.startswith("verify") or custom_id.startswith("verify_") or "admin_override" in qual_name:
                 return original_dispatch(event_name, *args, **kwargs)
