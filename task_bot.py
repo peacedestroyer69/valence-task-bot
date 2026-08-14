@@ -119,7 +119,15 @@ def is_user_locked_out(user: discord.User | discord.Member, udata: dict = None, 
 
     roles = getattr(member, "roles", [])
     for r in roles:
-        if r.id == LOCKOUT_ROLE_ID or str(r.id) == "1534636469443100692" or r.name in LOCKOUT_ROLE_NAMES:
+        r_name_lower = r.name.lower()
+        if (
+            r.id == LOCKOUT_ROLE_ID
+            or str(r.id) == "1534636469443100692"
+            or "locked out" in r_name_lower
+            or "quarantine" in r_name_lower
+            or "unverified" in r_name_lower
+            or r.name in LOCKOUT_ROLE_NAMES
+        ):
             return True
 
     if udata and udata.get("quarantined", False):
@@ -144,7 +152,19 @@ async def global_task_bot_lockout_check(interaction: discord.Interaction) -> boo
     if not user:
         return True
 
-    # Check database/task_db or study bot DB fallback
+    # 1. Fast Role check first
+    if is_user_locked_out(user, None, guild=interaction.guild):
+        if not interaction.response.is_done():
+            try:
+                await interaction.response.send_message(
+                    "🔒 You are currently **locked out**. Use `/verify` to solve puzzles and regain access.",
+                    ephemeral=True,
+                )
+            except Exception:
+                pass
+        return False
+
+    # 2. Check DB
     udata = {}
     try:
         from task_db import load_study_data
@@ -154,7 +174,7 @@ async def global_task_bot_lockout_check(interaction: discord.Interaction) -> boo
     except Exception as e:
         logger.warning(f"Task bot lockout DB check error: {e}")
 
-    if is_user_locked_out(user, udata, guild=interaction.guild):
+    if udata.get("quarantined", False):
         if not interaction.response.is_done():
             try:
                 await interaction.response.send_message(
