@@ -102,8 +102,27 @@ async def setup_hook():
 
 VALENCE_ID = 1149959648938954752
 UJJWAL_ID = 988358245595201536
+LOCKOUT_ROLE_ID = 1534636469443100692
+LOCKOUT_ROLE_NAMES = {"Locked Out", "Quarantined", "Unverified"}
 
 from discord import app_commands
+
+
+def is_user_locked_out(user: discord.User | discord.Member, udata: dict = None) -> bool:
+    """Returns True if the user has Role ID 1534636469443100692, any lockout role name, or quarantined=True in DB."""
+    if not user:
+        return False
+
+    roles = getattr(user, "roles", [])
+    for r in roles:
+        if r.id == LOCKOUT_ROLE_ID or str(r.id) == "1534636469443100692" or r.name in LOCKOUT_ROLE_NAMES:
+            return True
+
+    if udata and udata.get("quarantined", False):
+        return True
+
+    return False
+
 
 @bot.tree.interaction_check
 async def global_task_bot_lockout_check(interaction: discord.Interaction) -> bool:
@@ -111,8 +130,8 @@ async def global_task_bot_lockout_check(interaction: discord.Interaction) -> boo
     if not interaction.command:
         return True
 
-    cmd_name = interaction.command.name.lower()
-    qual_name = interaction.command.qualified_name.lower()
+    cmd_name = getattr(interaction.command, "name", "").lower()
+    qual_name = getattr(interaction.command, "qualified_name", "").lower()
 
     if cmd_name == "verify" or qual_name.startswith("verify") or "admin_override" in qual_name:
         return True
@@ -121,22 +140,17 @@ async def global_task_bot_lockout_check(interaction: discord.Interaction) -> boo
     if not user:
         return True
 
-    # Check Discord Roles ("Locked Out", "Quarantined", "Unverified")
-    roles = getattr(user, "roles", [])
-    has_lockout_role = any(r.name in ("Locked Out", "Quarantined", "Unverified") for r in roles)
-
     # Check database/task_db or study bot DB fallback
-    is_quarantined_db = False
+    udata = {}
     try:
         from task_db import load_study_data
         data = await load_study_data()
         uid = str(user.id)
         udata = data.get("users", {}).get(uid, {})
-        is_quarantined_db = udata.get("quarantined", False)
     except Exception as e:
         logger.warning(f"Task bot lockout DB check error: {e}")
 
-    if is_quarantined_db or has_lockout_role:
+    if is_user_locked_out(user, udata):
         if not interaction.response.is_done():
             try:
                 await interaction.response.send_message(
