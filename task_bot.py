@@ -25,6 +25,62 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+def apply_global_gateway_lockout(bot: commands.Bot, locked_role_id: int = 1534636469443100692):
+    """Patches bot.dispatch to drop messages/interactions from locked-out users at gateway level."""
+    original_dispatch = bot.dispatch
+
+    def check_locked(user):
+        if not user:
+            return False
+        if hasattr(user, "roles"):
+            for role in user.roles:
+                if role.id == locked_role_id or str(role.id) == "1534636469443100692" or role.name in {"Locked Out", "Quarantined", "Unverified"}:
+                    return True
+        elif isinstance(user, (discord.User, discord.Member)):
+            for guild in bot.guilds:
+                member = guild.get_member(user.id)
+                if member and any(role.id == locked_role_id or str(role.id) == "1534636469443100692" or role.name in {"Locked Out", "Quarantined", "Unverified"} for role in member.roles):
+                    return True
+        return False
+
+    def patched_dispatch(event_name, /, *args, **kwargs):
+        if event_name == "message" and args:
+            message = args[0]
+            if hasattr(message, "author") and check_locked(message.author):
+                content = getattr(message, "content", "")
+                if not content.startswith("!verify"):
+                    return
+
+        elif event_name == "interaction" and args:
+            interaction = args[0]
+            cmd_name = getattr(getattr(interaction, "command", None), "name", "").lower()
+            qual_name = getattr(getattr(interaction, "command", None), "qualified_name", "").lower()
+            custom_id = (interaction.data.get("custom_id") or "") if getattr(interaction, "data", None) else ""
+
+            if cmd_name == "verify" or qual_name.startswith("verify") or custom_id.startswith("verify_") or "admin_override" in qual_name:
+                return original_dispatch(event_name, *args, **kwargs)
+
+            user = getattr(interaction, "user", None)
+            if check_locked(user):
+                async def send_lockout():
+                    try:
+                        if not interaction.response.is_done():
+                            await interaction.response.send_message(
+                                "🔒 You are currently **locked out**. Use `/verify` to solve puzzles and regain access.",
+                                ephemeral=True,
+                            )
+                    except Exception:
+                        pass
+                if bot.loop and bot.loop.is_running():
+                    bot.loop.create_task(send_lockout())
+                return
+
+        return original_dispatch(event_name, *args, **kwargs)
+
+    bot.dispatch = patched_dispatch
+
+apply_global_gateway_lockout(bot)
+
 # Keep-alive web server route handlers
 async def handle_root(request):
     html = """<!DOCTYPE html>

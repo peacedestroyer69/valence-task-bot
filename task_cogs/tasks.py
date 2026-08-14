@@ -40,12 +40,12 @@ def is_user_locked_out(user: discord.User | discord.Member, udata: dict = None, 
     return False
 
 async def lockout_check(interaction: discord.Interaction) -> bool:
-    if not interaction.command:
-        return True
-    cmd_name = getattr(interaction.command, "name", "").lower()
-    qual_name = getattr(interaction.command, "qualified_name", "").lower()
-    if cmd_name == "verify" or qual_name.startswith("verify") or "admin_override" in qual_name:
-        return True
+    if interaction.command:
+        cmd_name = getattr(interaction.command, "name", "").lower()
+        qual_name = getattr(interaction.command, "qualified_name", "").lower()
+        if cmd_name == "verify" or qual_name.startswith("verify") or "admin_override" in qual_name:
+            return True
+
     user = interaction.user
     if not user:
         return True
@@ -99,6 +99,9 @@ class AddSubtaskModal(discord.ui.Modal, title="➕ Add Subtask Checklist Item"):
     def __init__(self, parent_view):
         super().__init__()
         self.parent_view = parent_view
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await lockout_check(interaction)
 
     async def on_submit(self, interaction: discord.Interaction):
         name = self.subtask_name.value
@@ -316,6 +319,8 @@ class TaskDetailView(discord.ui.View):
         await interaction.response.edit_message(embed=self.get_embed(), view=self)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not await lockout_check(interaction):
+            return False
         if interaction.user.id != self.caller_id:
             await interaction.response.send_message("❌ You cannot control this task detail card.", ephemeral=True)
             return False
@@ -365,6 +370,8 @@ class TaskDetailView(discord.ui.View):
                 self.parent_view = parent_view
                 
             async def interaction_check(self, sub_interaction: discord.Interaction) -> bool:
+                if not await lockout_check(sub_interaction):
+                    return False
                 if sub_interaction.user.id != self.parent_view.caller_id:
                     await sub_interaction.response.send_message("❌ You cannot confirm deletion for this task.", ephemeral=True)
                     return False
@@ -467,6 +474,8 @@ class TaskPaginationView(discord.ui.View):
         await interaction.response.edit_message(embed=self.get_embed(), view=self)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not await lockout_check(interaction):
+            return False
         if interaction.user.id != self.caller_id:
             await interaction.response.send_message("❌ You cannot control this list view.", ephemeral=True)
             return False
@@ -489,6 +498,9 @@ class DMSnoozeView(discord.ui.View):
                 await self.message.edit(view=self)
         except Exception:
             pass
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await lockout_check(interaction)
 
     @discord.ui.button(label="Complete", style=discord.ButtonStyle.green)
     async def btn_complete(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -659,6 +671,9 @@ class DMQuickAddModal(discord.ui.Modal, title="➕ Quick Add Task"):
         super().__init__()
         self.cog = cog
 
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await lockout_check(interaction)
+
     async def on_submit(self, interaction: discord.Interaction):
         title = self.task_title.value
         desc = self.task_desc.value or ""
@@ -720,6 +735,9 @@ class DMHomeView(discord.ui.View):
         except Exception:
             pass
         
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await lockout_check(interaction)
+
     @discord.ui.button(label="📋 View Pending", style=discord.ButtonStyle.primary, emoji="📋")
     async def btn_pending(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_id_str = str(self.user.id)

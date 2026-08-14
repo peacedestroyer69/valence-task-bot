@@ -32,6 +32,17 @@ class SyncCog(commands.Cog):
             await ctx.send("❌ Run this inside a server, not DMs.")
             return
 
+        try:
+            import sys
+            import os
+            # Ensure the correct path is in sys.path to import task_db/tasks logic
+            from task_cogs.tasks import is_user_locked_out
+            if is_user_locked_out(ctx.author, None, guild):
+                await ctx.send("🔒 You are currently **locked out**. Use `/verify` to solve puzzles and regain access.")
+                return
+        except ImportError:
+            pass
+
         async with ctx.typing():
             try:
                 if spec is None:

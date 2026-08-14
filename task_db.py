@@ -359,26 +359,13 @@ def update_streak(user_id: str) -> int:
         if current_streak > best_streak:
             best_streak = current_streak
 
-        # Use atomic SQL for total_completed instead of read-then-write
-        if use_sqlite:
-            conn = sqlite3.connect(SQLITE_DB_PATH)
-            try:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "UPDATE users SET streak = ?, last_completed_date = ?, total_completed = total_completed + 1, best_streak = ? WHERE user_id = ?",
-                    (current_streak, today_str, best_streak, str(user_id))
-                )
-                conn.commit()
-            finally:
-                conn.close()
-        else:
-            # For Firebase, we still do the field-based update (no atomic increment available via simple dict)
-            update_user_profile(user_id, {
-                "streak": current_streak,
-                "last_completed_date": today_str,
-                "total_completed": profile.get("total_completed", 0) + 1,
-                "best_streak": best_streak
-            })
+        # Update cache and database via update_user_profile
+        update_user_profile(user_id, {
+            "streak": current_streak,
+            "last_completed_date": today_str,
+            "total_completed": profile.get("total_completed", 0) + 1,
+            "best_streak": best_streak
+        })
 
         return current_streak
 

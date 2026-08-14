@@ -15,6 +15,13 @@ class TestTaskDatabase(unittest.TestCase):
         task_db.use_sqlite = True
         task_db.SQLITE_DB_PATH = os.path.join(tempfile.gettempdir(), "test_tasks_local.db")
         
+        # Clear caches
+        task_db._TASK_USER_CACHE.clear()
+        task_db._TASK_CACHE.clear()
+        task_db._DIRTY_TASK_USERS.clear()
+        task_db._DIRTY_TASKS.clear()
+        task_db._DELETED_TASKS.clear()
+        
         # Clean up database if it exists from previous failures
         if os.path.exists(task_db.SQLITE_DB_PATH):
             try:
