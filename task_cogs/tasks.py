@@ -16,6 +16,76 @@ import task_db
 
 logger = logging.getLogger("TaskBot.tasks")
 
+LOCKOUT_ROLE_ID = 1534636469443100692
+
+def is_user_locked_out(user: discord.User | discord.Member, udata: dict = None, guild: discord.Guild = None) -> bool:
+    if not user:
+        return False
+    member = user
+    if guild and not isinstance(user, discord.Member):
+        member = guild.get_member(user.id) or user
+    roles = getattr(member, "roles", [])
+    for r in roles:
+        r_name_lower = r.name.lower()
+        if (
+            r.id == LOCKOUT_ROLE_ID
+            or str(r.id) == "1534636469443100692"
+            or "locked out" in r_name_lower
+            or "quarantine" in r_name_lower
+            or "unverified" in r_name_lower
+        ):
+            return True
+    if udata and udata.get("quarantined", False):
+        return True
+    return False
+
+async def lockout_check(interaction: discord.Interaction) -> bool:
+    if not interaction.command:
+        return True
+    cmd_name = getattr(interaction.command, "name", "").lower()
+    qual_name = getattr(interaction.command, "qualified_name", "").lower()
+    if cmd_name == "verify" or qual_name.startswith("verify") or "admin_override" in qual_name:
+        return True
+    user = interaction.user
+    if not user:
+        return True
+
+    # 1. Fast Role check first (by Role ID 1534636469443100692)
+    if is_user_locked_out(user, None, guild=interaction.guild):
+        if not interaction.response.is_done():
+            try:
+                await interaction.response.send_message(
+                    "🔒 You are currently **locked out**. Use `/verify` to solve puzzles and regain access.",
+                    ephemeral=True,
+                )
+            except Exception:
+                pass
+        return False
+
+    # 2. Check DB
+    udata = {}
+    try:
+        from task_db import load_study_data
+        data = await load_study_data()
+        uid = str(user.id)
+        udata = data.get("users", {}).get(uid, {})
+    except Exception:
+        pass
+
+    if udata.get("quarantined", False):
+        if not interaction.response.is_done():
+            try:
+                await interaction.response.send_message(
+                    "🔒 You are currently **locked out**. Use `/verify` to solve puzzles and regain access.",
+                    ephemeral=True,
+                )
+            except Exception:
+                pass
+        return False
+
+    return True
+
+
 # --- UI Helpers & Modals ---
 
 class AddSubtaskModal(discord.ui.Modal, title="➕ Add Subtask Checklist Item"):
@@ -742,6 +812,9 @@ class ChecklistGroup(app_commands.Group):
         super().__init__(name="checklist", description="Subtask checklist management")
         self.cog = cog
 
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await lockout_check(interaction)
+
     async def checklist_task_id_autocomplete(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
         return await self.cog.task_id_autocomplete(interaction, current)
 
@@ -864,6 +937,9 @@ class FocusGroup(app_commands.Group):
         super().__init__(name="focus", description="Focus timer control commands")
         self.cog = cog
 
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await lockout_check(interaction)
+
     async def focus_task_id_autocomplete(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
         return await self.cog.task_id_autocomplete(interaction, current)
 
@@ -954,12 +1030,17 @@ class TasksCog(commands.Cog, name="Tasks"):
         self.reminder_task.start()
         self.planner_alerts_task.start()
 
+        self.task_group.interaction_check = lockout_check
+
         # Reload-safe dynamic nesting for groups requiring self reference
         existing_names = [cmd.name for cmd in self.task_group.commands]
         if "checklist" not in existing_names:
             self.task_group.add_command(ChecklistGroup(self))
         if "focus" not in existing_names:
             self.task_group.add_command(FocusGroup(self))
+
+    async def cog_app_command_check(self, interaction: discord.Interaction) -> bool:
+        return await lockout_check(interaction)
 
     def cog_unload(self):
         self.habit_reset_loop.cancel()
